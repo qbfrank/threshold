@@ -1,0 +1,1689 @@
+import { useState, useEffect, useRef, useCallback, useMemo, memo } from "react";
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 1: CONFIGURATION                                                   ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+const CFG = {
+  poolSize: 10,
+  clustersPerPool: 2,
+  nodesPerCluster: 5,
+  poolCount: 2,
+  timing: { travelMs: 1000 },
+  // Canvas: concentric orbits — commons at center, nodes orbit, then outer context
+  canvas: { W: 700, H: 700 },
+  orbits: {
+    commonsR: 40,       // commons pool at center
+    nodeR: 200,         // satellite nodes orbit
+    nodeSize: 15,       // individual node circle radius
+    siblingR: 270,      // sibling pools orbit (zoomed-in only)
+    siblingSize: 14,    // sibling pool circle radius
+    metaR: 320,         // meta commons orbit (zoomed-in only)
+    metaSize: 18,       // meta commons circle radius
+  },
+  defaults: { fieldRate: 0.10, commonsRate: 0.05, injectAmt: 3000 },
+  demo: { intervalMs: 2500, startMs: 500 },
+  log: { max: 200 },
+};
+
+const W = CFG.canvas.W, H = CFG.canvas.H;
+const CX = W / 2, CY = H / 2;
+
+const POOL_DEFS = [
+  {
+    id: 0, label: "Common Pool A", short: "POOL A",
+    clusters: [
+      { name: "Mycelium", color: "#38bdf8" },
+      { name: "Canopy",   color: "#4ade80" },
+    ],
+    names: ["Alex","Blair","Casey","Dana","Ellis","Fern","Gray","Harper","Iris","Jules"],
+    color: "#38bdf8",
+  },
+  {
+    id: 1, label: "Common Pool B", short: "POOL B",
+    clusters: [
+      { name: "Tidal", color: "#f97316" },
+      { name: "Coral", color: "#fb7185" },
+    ],
+    names: ["Kai","Lane","Morgan","Noa","Owen","Page","Quinn","River","Sage","Teal"],
+    color: "#c084fc",
+  },
+];
+
+const LAYER_COLORS = ["#fcd34d", "#4ade80", "#38bdf8", "#c084fc"];
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 2: PURE UTILITIES                                                  ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+function createRng(seed) {
+  let s = seed >>> 0;
+  return () => { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s >>>= 0; s ^= s << 5; s >>>= 0; return s / 0xffffffff; };
+}
+
+function shuffleWith(arr, rng) {
+  const a = [...arr];
+  for (let k = a.length - 1; k > 0; k--) { const j = Math.floor(rng() * (k + 1)); [a[k], a[j]] = [a[j], a[k]]; }
+  return a;
+}
+
+// ── Flow Mathematics ─────────────────────────────────────────────────────────
+// Event-driven: fires ONCE per receipt. Routes only the INCOMING amount, never
+// re-processes settled excess. This prevents cascade explosion where a $1 receipt
+// at a node with $1000 excess would previously trigger $150+ of outflow.
+//
+// Received capital is split into 3 zones:
+//   deficit fill:  portion that brings balance from below-min up to min → retained 100%
+//   sub-max fill:  portion that lands between min and max → commonsRate + fieldRate exits
+//   overflow:      portion above max → 100% exits (split by commonsRate:fieldRate ratio)
+//
+const FlowMath = {
+  onReceipt(prevBalance, received, min, max, fieldRate, commonsRate) {
+    const newTotal = prevBalance + received;
+
+    if (newTotal <= min) return { toCommons: 0, toField: 0, newBalance: newTotal };
+
+    // Split received into deficit fill, sub-max fill, overflow
+    const subMaxFill = Math.max(0, Math.min(newTotal, max) - Math.max(prevBalance, min));
+    const overflow = Math.max(0, newTotal - max);
+
+    // Sub-max: proportional rates on new capital only
+    let toCommons = subMaxFill * commonsRate;
+    let toField = subMaxFill * fieldRate;
+
+    // Overflow: 100% exits, split by ratio
+    if (overflow > 0) {
+      const total = commonsRate + fieldRate;
+      const oC = total > 0 ? overflow * (commonsRate / total) : 0;
+      toCommons += oC;
+      toField += overflow - oC;
+    }
+
+    // Round to whole dollars. Under $1 stays in balance — never move pennies.
+    toCommons = toCommons >= 1 ? Math.round(toCommons) : 0;
+    toField = toField >= 1 ? Math.round(toField) : 0;
+
+    return { toCommons, toField, newBalance: newTotal - toCommons - toField };
+  },
+};
+
+// ── Activation-Priority Routing ──────────────────────────────────────────────
+// Routes whole dollars only.
+//   Phase 1: Fill below-min recipients (cheapest to activate first)
+//   Phase 2: Split remainder among recipients WITH ROOM (balance < max)
+//   Phase 3: Return unroutable capital (everyone full → goes to commons)
+//
+// getDeficit(id)  → distance below min (0 if at or above)
+// getHeadroom(id) → distance below max (0 if at max — SKIP this node)
+//
+function routeByActivation(amount, recipientIds, getDeficit, getHeadroom) {
+  amount = Math.floor(amount);
+  if (amount < 1 || recipientIds.length === 0) return { allocs: [], unroutable: amount };
+
+  // Filter out full nodes (no headroom) and annotate
+  const candidates = recipientIds
+    .map(id => ({ id, deficit: Math.round(getDeficit(id)), headroom: getHeadroom ? Math.round(getHeadroom(id)) : Infinity }))
+    .filter(c => c.headroom > 0)
+    .sort((a, b) => {
+      if (a.deficit > 0 && b.deficit > 0) return a.deficit - b.deficit;
+      if (a.deficit > 0) return -1;
+      if (b.deficit > 0) return 1;
+      return 0;
+    });
+
+  if (candidates.length === 0) return { allocs: [], unroutable: amount };
+
+  let remaining = amount;
+  const allocs = new Map();
+
+  // Phase 1: Activate below-minimum nodes (cheapest first, capped at headroom)
+  for (const { id, deficit, headroom } of candidates) {
+    if (remaining < 1) break;
+    if (deficit <= 0) continue;
+    const give = Math.min(remaining, deficit, headroom);
+    if (give >= 1) {
+      allocs.set(id, (allocs.get(id) || 0) + give);
+      remaining -= give;
+    }
+  }
+
+  // Phase 2: Split among nodes with remaining headroom
+  const withRoom = candidates.filter(c => {
+    const already = allocs.get(c.id) || 0;
+    return c.headroom - already > 0;
+  });
+
+  if (remaining >= 1 && withRoom.length > 0) {
+    const share = Math.floor(remaining / withRoom.length);
+    if (share >= 1) {
+      for (const c of withRoom) {
+        const already = allocs.get(c.id) || 0;
+        const give = Math.min(share, c.headroom - already);
+        if (give >= 1) {
+          allocs.set(c.id, already + give);
+          remaining -= give;
+        }
+      }
+    }
+    // Rounding residual to first with room
+    for (const c of withRoom) {
+      if (remaining < 1) break;
+      const already = allocs.get(c.id) || 0;
+      const room = c.headroom - already;
+      if (room >= 1) {
+        allocs.set(c.id, already + 1);
+        remaining -= 1;
+      }
+    }
+  }
+
+  const result = [...allocs.entries()].filter(([, a]) => a >= 1).map(([id, a]) => ({ id, amount: a }));
+  return { allocs: result, unroutable: remaining };
+}
+
+function lerpHex(a, b, t) {
+  const [ah, bh] = [a, b].map(c => parseInt(c.slice(1), 16));
+  const ch = [16, 8, 0].map(s => Math.round(((ah >> s) & 0xff) + (((bh >> s) & 0xff) - ((ah >> s) & 0xff)) * t));
+  return `#${ch.map(v => v.toString(16).padStart(2, "0")).join("")}`;
+}
+
+// ── Traffic Light Colors ─────────────────────────────────────────────────────
+// Red = deficit (below min). Amber = flowing (between min and max). Green = at max.
+const TRAFFIC = { deficit: "#ef4444", flowing: "#f59e0b", atMax: "#22c55e" };
+
+function nodeColor(bal, min, max) {
+  if (bal <= 0)  return TRAFFIC.deficit;
+  if (bal < min) return lerpHex(TRAFFIC.deficit, TRAFFIC.flowing, bal / min);
+  if (bal >= max) return TRAFFIC.atMax;
+  return lerpHex(TRAFFIC.flowing, TRAFFIC.atMax, (bal - min) / (max - min));
+}
+
+function getState(bal, min, max) {
+  return bal < min ? "deficit" : bal >= max ? "full" : "flowing";
+}
+
+// ── Balance Display ──────────────────────────────────────────────────────────
+// Show actual dollars so every flow is visible. $0 hidden, under $100k full,
+// over $100k abbreviated.
+function fmtBal(bal) {
+  if (bal <= 0) return "";
+  const v = Math.round(bal);
+  if (v >= 100000) return `$${(v / 1000).toFixed(0)}k`;
+  return `$${v.toLocaleString()}`;
+}
+
+function polarXY(i, total, cx, cy, r) {
+  const a = (2 * Math.PI * i) / total - Math.PI / 2;
+  return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
+}
+
+function bezCtrl(f, t) {
+  return { cx: (f.x + t.x) / 2 + (t.y - f.y) * 0.14, cy: (f.y + t.y) / 2 - (t.x - f.x) * 0.14 };
+}
+function edgePath(f, t) { const { cx, cy } = bezCtrl(f, t); return `M${f.x},${f.y} Q${cx},${cy} ${t.x},${t.y}`; }
+function bezAt(f, t, p) {
+  const { cx, cy } = bezCtrl(f, t); const u = 1 - p;
+  return { x: u*u*f.x + 2*u*p*cx + p*p*t.x, y: u*u*f.y + 2*u*p*cy + p*p*t.y };
+}
+
+function bfsLayers(id, graph, depth = 3) {
+  const visited = new Set([id]), layers = [[id]];
+  for (let d = 0; d < depth; d++) {
+    const next = [];
+    for (const n of layers[d]) for (const s of (graph[n] || [])) if (!visited.has(s)) { visited.add(s); next.push(s); }
+    layers.push(next);
+  }
+  return layers;
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 3: TOPOLOGY GENERATION                                             ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+function buildPoolTopology(poolDef, seed) {
+  const N = CFG.poolSize;
+  const rng = createRng(seed);
+  const threshRng = createRng(seed + 0x1000);
+
+  const clusterOf = i => Math.floor(i / CFG.nodesPerCluster);
+
+  // Flow graph: 2 within-cluster + 1 bridge
+  const flows = Array.from({ length: N }, () => []);
+  for (let i = 0; i < N; i++) {
+    const c = clusterOf(i);
+    const peers = shuffleWith(
+      Array.from({ length: CFG.nodesPerCluster }, (_, k) => c * CFG.nodesPerCluster + k).filter(j => j !== i), rng
+    );
+    flows[i].push(peers[0], peers[1]);
+    const bc = (c + 1) % CFG.clustersPerPool;
+    const bp = shuffleWith(Array.from({ length: CFG.nodesPerCluster }, (_, k) => bc * CFG.nodesPerCluster + k), rng);
+    flows[i].push(bp[0]);
+  }
+
+  const nodes = poolDef.names.map((name, i) => ({
+    id: i, name, cluster: clusterOf(i),
+    min: Math.round((1000 + threshRng() * 2000) / 100) * 100,
+    max: Math.round((5500 + threshRng() * 2500) / 100) * 100,
+    flows: flows[i],
+  }));
+
+  const positions = nodes.map((_, i) => polarXY(i, N, CX, CY, CFG.orbits.nodeR));
+
+  // Commons: default flows to first node of each cluster
+  const commonsFlows = Array.from({ length: CFG.clustersPerPool }, (_, c) => c * CFG.nodesPerCluster);
+
+  return { nodes, positions, flows, commonsFlows, clusters: poolDef.clusters };
+}
+
+const POOL_TOPOS = [
+  buildPoolTopology(POOL_DEFS[0], 0xdeadbeef),
+  buildPoolTopology(POOL_DEFS[1], 0xcafebabe),
+];
+
+// Meta-level positions: 2 pool nodes on a ring around center
+const META_POS = [0, 1].map(i => polarXY(i, 2, CX, CY, CFG.orbits.nodeR));
+const COMMONS_POS = { x: CX, y: CY };
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 4: THRESHOLD INITIALIZATION                                        ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+function makeInitThresholds() {
+  return {
+    pools: POOL_TOPOS.map(topo => ({
+      nodes: topo.nodes.map(n => ({ min: n.min, max: n.max })),
+      commons: { min: 5000, max: 25000 },
+    })),
+    meta: {
+      commons: { min: 5000, max: 50000 },
+    },
+  };
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 5: SIMULATION ENGINE                                               ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+let _fid = 0;
+
+function makeSimState() {
+  return {
+    pools: [
+      { balances: new Float64Array(CFG.poolSize), commonsBalance: 0 },
+      { balances: new Float64Array(CFG.poolSize), commonsBalance: 0 },
+    ],
+    metaCommonsBalance: 0,
+    pending: [],
+    flights: [],
+    totalInjected: 0,
+  };
+}
+
+function useSimulation() {
+  const simRef = useRef(makeSimState());
+  const paramsRef = useRef({ ...CFG.defaults });
+  const threshRef = useRef(makeInitThresholds());
+  const commonsFlowsRef = useRef(POOL_TOPOS.map(t => [...t.commonsFlows]));
+  const metaFlowsRef = useRef([[1], [0]]);           // Pool A → Pool B, Pool B → Pool A
+  const metaCommonsFlowsRef = useRef([0, 1]);         // Meta commons → both pools
+
+  const [params, _setP] = useState({ ...CFG.defaults });
+  const [thresholds, _setT] = useState(makeInitThresholds);
+  const [commonsFlows, _setCF] = useState(POOL_TOPOS.map(t => [...t.commonsFlows]));
+  const [metaFlows, _setMF] = useState([[1], [0]]);
+  const [metaCommonsFlows, _setMCF] = useState([0, 1]);
+  const [log, setLog] = useState([]);
+  const [commonsRipples, setCommonsRipples] = useState([]);
+  const ripIdRef = useRef(0);
+
+  const [snap, setSnap] = useState({
+    pools: [
+      { balances: new Float64Array(CFG.poolSize), commonsBalance: 0 },
+      { balances: new Float64Array(CFG.poolSize), commonsBalance: 0 },
+    ],
+    metaCommonsBalance: 0,
+    flights: [],
+    pendingTotal: 0,
+    ts: Date.now(),
+    totalInjected: 0,
+  });
+
+  // ── Synced setters ────────────────────────────────────────────────────────
+  const setParam = useCallback((k, v) => {
+    paramsRef.current = { ...paramsRef.current, [k]: v };
+    _setP({ ...paramsRef.current });
+  }, []);
+
+  const setThreshold = useCallback((path, field, raw) => {
+    const val = Math.max(0, Number(raw) || 0);
+    const t = JSON.parse(JSON.stringify(threshRef.current));
+    // path: ["pools", poolIdx, "nodes", nodeIdx] | ["pools", poolIdx, "commons"] | ["meta", "pools", poolIdx] | ["meta", "commons"]
+    let obj = t;
+    for (let i = 0; i < path.length; i++) obj = obj[path[i]];
+    obj[field] = val;
+    threshRef.current = t;
+    _setT(JSON.parse(JSON.stringify(t)));
+  }, []);
+
+  const setPoolCommonsFlow = useCallback((poolIdx, slot, nodeId) => {
+    const cf = commonsFlowsRef.current.map((a, i) => i === poolIdx ? a.map((v, j) => j === slot ? nodeId : v) : [...a]);
+    commonsFlowsRef.current = cf;
+    _setCF(cf.map(a => [...a]));
+  }, []);
+
+  const setMetaFlow = useCallback((poolIdx, slot, targetPoolIdx) => {
+    const mf = metaFlowsRef.current.map((a, i) => i === poolIdx ? a.map((v, j) => j === slot ? targetPoolIdx : v) : [...a]);
+    metaFlowsRef.current = mf;
+    _setMF(mf.map(a => [...a]));
+  }, []);
+
+  const setMetaCommonsFlow = useCallback((slot, poolIdx) => {
+    const mcf = metaCommonsFlowsRef.current.map((v, i) => i === slot ? poolIdx : v);
+    metaCommonsFlowsRef.current = mcf;
+    _setMCF([...mcf]);
+  }, []);
+
+  const appendLog = useCallback((entries) => {
+    setLog(prev => [...entries, ...prev].slice(0, CFG.log.max));
+  }, []);
+
+  const triggerRipple = useCallback((level) => {
+    const id = ripIdRef.current++;
+    setCommonsRipples(prev => [...prev, { id, ts: Date.now(), level }]);
+    setTimeout(() => setCommonsRipples(prev => prev.filter(r => r.id !== id)), 1400);
+  }, []);
+
+  // ── Core flow processors ──────────────────────────────────────────────────
+
+  const schedFlight = useCallback((from, to, ts, amount, level) => {
+    const sim = simRef.current;
+    sim.flights.push({ id: _fid++, from, to, startMs: ts, amount, level });
+    sim.pending.push({ to, amount, deliverAt: ts + CFG.timing.travelMs, from, level });
+  }, []);
+
+  // Visual-only flight: no pending delivery. Used for flows already applied
+  // instantly (commons tax, overflow to meta) that need animated edges.
+  const schedVisual = useCallback((from, to, ts, amount, level) => {
+    simRef.current.flights.push({ id: _fid++, from, to, startMs: ts, amount, level });
+  }, []);
+
+  // Process meta-commons on receipt — distributes to pool commons (activation priority)
+  const processMetaCommons = useCallback((received, ts) => {
+    const sim = simRef.current;
+    const { fieldRate } = paramsRef.current;
+    const th = threshRef.current.meta.commons;
+    const prevBal = sim.metaCommonsBalance - received;
+    const { toField, newBalance } = FlowMath.onReceipt(prevBal, received, th.min, th.max, fieldRate, 0);
+    sim.metaCommonsBalance = newBalance;
+    if (toField < 1) return;
+    // Distribute to pool commons, closest-to-activation first
+    const allPoolIds = Array.from({ length: CFG.poolCount }, (_, i) => i);
+    const getDeficit = pIdx => Math.max(0, threshRef.current.pools[pIdx].commons.min - sim.pools[pIdx].commonsBalance);
+    const getRoom = pIdx => Math.max(0, threshRef.current.pools[pIdx].commons.max - sim.pools[pIdx].commonsBalance);
+    const { allocs } = routeByActivation(toField, allPoolIds, getDeficit, getRoom);
+    for (const { id: pIdx, amount } of allocs) {
+      if (amount >= 1) schedFlight("mc", `p${pIdx}`, ts, amount, "meta");
+    }
+    if (allocs.length) appendLog([`◎ Meta Commons → ${allocs.map(a => `${POOL_DEFS[a.id].short} $${Math.round(a.amount).toLocaleString()}`).join(", ")}`]);
+  }, [schedFlight, appendLog]);
+
+  // Process pool commons on receipt.
+  // Delta-only: routes only the RECEIVED amount through zones.
+  //
+  //   Below min  → retained. Commons is accumulating.
+  //   Sub-max    → fieldRate% flows DOWN to nearest-to-activation satellite.
+  //   Overflow   → FIRST fill ALL satellites to their min (nobody left behind).
+  //                THEN remainder flows to SIBLING pool commons (activation priority).
+  //                Whatever siblings can't absorb → meta commons.
+  //
+  const processPoolCommons = useCallback((poolIdx, received, ts) => {
+    const sim = simRef.current;
+    const pool = sim.pools[poolIdx];
+    const { fieldRate, commonsRate } = paramsRef.current;
+    const th = threshRef.current.pools[poolIdx].commons;
+
+    const prevBal = pool.commonsBalance - received;
+    const newTotal = pool.commonsBalance;
+
+    if (newTotal <= th.min) return;
+
+    const nodeTh = threshRef.current.pools[poolIdx].nodes;
+    const allNodeIds = Array.from({ length: CFG.poolSize }, (_, i) => i);
+    const getDeficit = id => Math.max(0, nodeTh[id].min - pool.balances[id]);
+    const getRoom = id => Math.max(0, nodeTh[id].max - pool.balances[id]);
+
+    // Split received into zones
+    const subMaxFill = Math.max(0, Math.min(newTotal, th.max) - Math.max(prevBal, th.min));
+    const overflow = Math.max(0, newTotal - th.max);
+
+    // ── Sub-max: fieldRate% flows DOWN to nearest-to-activation ────────
+    const subField = subMaxFill * fieldRate;
+    if (subField >= 1) {
+      const { allocs } = routeByActivation(subField, allNodeIds, getDeficit, getRoom);
+      let distributed = 0;
+      for (const { id, amount } of allocs) {
+        if (amount >= 1) {
+          schedFlight(`c${poolIdx}`, id, ts, amount, `pool${poolIdx}`);
+          distributed += amount;
+        }
+      }
+      pool.commonsBalance -= distributed;
+    }
+
+    // ── Overflow: fill ALL satellite deficits first ───────────────────
+    if (overflow < 1) return;
+
+    let surplus = Math.floor(overflow);
+
+    // Step 1: Fill satellites to min
+    const totalDeficit = allNodeIds.reduce((s, id) => s + getDeficit(id), 0);
+    const toSatellites = Math.min(surplus, Math.floor(totalDeficit));
+    if (toSatellites >= 1) {
+      const { allocs } = routeByActivation(toSatellites, allNodeIds, getDeficit, getRoom);
+      let distributed = 0;
+      for (const { id, amount } of allocs) {
+        if (amount >= 1) {
+          schedFlight(`c${poolIdx}`, id, ts, amount, `pool${poolIdx}`);
+          distributed += amount;
+        }
+      }
+      pool.commonsBalance -= distributed;
+      surplus -= distributed;
+    }
+
+    if (surplus < 1) return;
+
+    // Step 2: Sibling pool commons (activation priority, commonsRate% tax to meta)
+    const siblingIds = POOL_DEFS.filter(p => p.id !== poolIdx).map(p => p.id);
+    const commonsToMeta = commonsRate > 0 ? Math.round(surplus * commonsRate / (commonsRate + fieldRate)) : 0;
+    const toSiblings = surplus - commonsToMeta;
+
+    if (toSiblings >= 1 && siblingIds.length > 0) {
+      const getSibDeficit = pIdx => Math.max(0, threshRef.current.pools[pIdx].commons.min - sim.pools[pIdx].commonsBalance);
+      const getSibRoom = pIdx => Math.max(0, threshRef.current.pools[pIdx].commons.max - sim.pools[pIdx].commonsBalance);
+      const { allocs, unroutable } = routeByActivation(toSiblings, siblingIds, getSibDeficit, getSibRoom);
+      let distributed = 0;
+      for (const { id: tgt, amount } of allocs) {
+        if (amount >= 1) {
+          schedFlight(`c${poolIdx}`, `p${tgt}`, ts, amount, "meta");
+          distributed += amount;
+        }
+      }
+      pool.commonsBalance -= distributed;
+      if (distributed >= 1) {
+        appendLog([`↝ ${POOL_DEFS[poolIdx].short} → ${allocs.filter(a => a.amount >= 1).map(a => `${POOL_DEFS[a.id].short} $${Math.round(a.amount).toLocaleString()}`).join(", ")}`]);
+      }
+      // Unroutable (siblings full) → also goes to meta commons
+      const extraToMeta = Math.floor(unroutable);
+      if (extraToMeta >= 1) {
+        pool.commonsBalance -= extraToMeta;
+        sim.metaCommonsBalance += extraToMeta;
+        schedVisual(`c${poolIdx}`, "mc", ts, extraToMeta, "meta");
+        processMetaCommons(extraToMeta, ts);
+      }
+    }
+
+    // Step 3: Commons tax → meta commons
+    if (commonsToMeta >= 1) {
+      pool.commonsBalance -= commonsToMeta;
+      sim.metaCommonsBalance += commonsToMeta;
+      schedVisual(`c${poolIdx}`, "mc", ts, commonsToMeta, "meta");
+      processMetaCommons(commonsToMeta, ts);
+    }
+  }, [schedFlight, schedVisual, appendLog, processMetaCommons]);
+
+  // Apply receipt to a person node within a pool (user injections only).
+  // Commons tax always applies to user injections.
+  // Commons→node tax exemption is handled separately in the animation loop (line ~472).
+  const applyPoolReceipt = useCallback((poolIdx, nodeIdx, amt, ts) => {
+    const sim = simRef.current;
+    const pool = sim.pools[poolIdx];
+    const { fieldRate, commonsRate } = paramsRef.current;
+    const th = threshRef.current.pools[poolIdx].nodes[nodeIdx];
+
+    const prevBal = pool.balances[nodeIdx];
+    pool.balances[nodeIdx] += amt;
+    const { toCommons, toField, newBalance } = FlowMath.onReceipt(prevBal, amt, th.min, th.max, fieldRate, commonsRate);
+    pool.balances[nodeIdx] = newBalance;
+
+    if (toCommons >= 1) {
+      schedVisual(nodeIdx, `c${poolIdx}`, ts, toCommons, `pool${poolIdx}`);
+      pool.commonsBalance += toCommons;
+      processPoolCommons(poolIdx, toCommons, ts);
+    }
+    if (toField >= 1) {
+      const flows = POOL_TOPOS[poolIdx].flows[nodeIdx];
+      if (flows && flows.length > 0) {
+        const nodeTh = threshRef.current.pools[poolIdx].nodes;
+        const getDeficit = id => Math.max(0, nodeTh[id].min - pool.balances[id]);
+        const getRoom = id => Math.max(0, nodeTh[id].max - pool.balances[id]);
+        const { allocs, unroutable } = routeByActivation(toField, flows, getDeficit, getRoom);
+        for (const { id: to, amount } of allocs) {
+          if (amount >= 1) schedFlight(nodeIdx, to, ts, amount, `pool${poolIdx}`);
+        }
+        // Peers all full → surplus goes to commons instead
+        if (unroutable >= 1) {
+          schedVisual(nodeIdx, `c${poolIdx}`, ts, unroutable, `pool${poolIdx}`);
+          pool.commonsBalance += unroutable;
+          processPoolCommons(poolIdx, unroutable, ts);
+        }
+      }
+    }
+  }, [schedFlight, schedVisual, processPoolCommons]);
+
+  // ── Conservation snapshot for log ──────────────────────────────────────
+  const snapBalance = useCallback(() => {
+    const sim = simRef.current;
+    const pA = Math.round(sim.pools[0].balances.reduce((s,v)=>s+v,0));
+    const cA = Math.round(sim.pools[0].commonsBalance);
+    const pB = Math.round(sim.pools[1].balances.reduce((s,v)=>s+v,0));
+    const cB = Math.round(sim.pools[1].commonsBalance);
+    const mc = Math.round(sim.metaCommonsBalance);
+    const fl = Math.round(sim.pending.reduce((s,p)=>s+p.amount,0));
+    const total = pA + cA + pB + cB + mc + fl;
+    const inj = Math.round(sim.totalInjected);
+    const gap = inj - total;
+    return `  [A: nodes $${pA} commons $${cA}] [B: nodes $${pB} commons $${cB}] [META $${mc}] [flight $${fl}] = $${total}/${inj}${gap !== 0 ? ` ⚠GAP $${gap}` : ' ✓'}`;
+  }, []);
+
+  // ── Public actions ────────────────────────────────────────────────────────
+  const injectNode = useCallback((poolIdx, nodeIdx, silent = false, amt = null) => {
+    amt = amt ?? paramsRef.current.injectAmt;
+    const sim = simRef.current;
+    sim.totalInjected += amt;
+    applyPoolReceipt(poolIdx, nodeIdx, amt, Date.now());
+    if (!silent) appendLog([`⚡ +$${Math.round(amt).toLocaleString()} → ${POOL_TOPOS[poolIdx].nodes[nodeIdx].name}`, snapBalance()]);
+  }, [applyPoolReceipt, appendLog, snapBalance]);
+
+  const injectPoolCommons = useCallback((poolIdx, amt = null) => {
+    amt = amt ?? paramsRef.current.injectAmt;
+    const sim = simRef.current;
+    sim.pools[poolIdx].commonsBalance += amt;
+    sim.totalInjected += amt;
+    processPoolCommons(poolIdx, amt, Date.now());
+    appendLog([`⚡ +$${Math.round(amt).toLocaleString()} → ${POOL_DEFS[poolIdx].label} Commons`, snapBalance()]);
+    triggerRipple(`pool${poolIdx}`);
+  }, [processPoolCommons, appendLog, triggerRipple, snapBalance]);
+
+  const injectMetaCommons = useCallback((amt = null) => {
+    amt = amt ?? paramsRef.current.injectAmt;
+    const sim = simRef.current;
+    sim.metaCommonsBalance += amt;
+    sim.totalInjected += amt;
+    processMetaCommons(amt, Date.now());
+    appendLog([`⚡ +$${Math.round(amt).toLocaleString()} → Meta Commons`, snapBalance()]);
+    triggerRipple("meta");
+  }, [processMetaCommons, appendLog, triggerRipple, snapBalance]);
+
+  const fillNodeToMax = useCallback((poolIdx, nodeIdx) => {
+    const bal = simRef.current.pools[poolIdx].balances[nodeIdx];
+    const needed = Math.max(0, threshRef.current.pools[poolIdx].nodes[nodeIdx].max - bal + 1);
+    injectNode(poolIdx, nodeIdx, false, needed);
+  }, [injectNode]);
+
+  const fillPoolCommonsToMax = useCallback((poolIdx) => {
+    const needed = Math.max(0, threshRef.current.pools[poolIdx].commons.max - simRef.current.pools[poolIdx].commonsBalance + 1);
+    injectPoolCommons(poolIdx, needed);
+  }, [injectPoolCommons]);
+
+  const fillMetaCommonsToMax = useCallback(() => {
+    const needed = Math.max(0, threshRef.current.meta.commons.max - simRef.current.metaCommonsBalance + 1);
+    injectMetaCommons(needed);
+  }, [injectMetaCommons]);
+
+  const reset = useCallback(() => {
+    simRef.current = makeSimState();
+    setLog([]);
+  }, []);
+
+  // ── Animation loop ────────────────────────────────────────────────────────
+  useEffect(() => {
+    let raf;
+    const loop = () => {
+      const sim = simRef.current;
+      const ts = Date.now();
+      const { fieldRate, commonsRate } = paramsRef.current;
+      const still = [], newP = [], newLog = [];
+
+      for (const p of sim.pending) {
+        if (p.deliverAt > ts) { still.push(p); continue; }
+
+        if (p.level === "meta") {
+          // Meta delivery: to a pool commons or meta commons
+          if (typeof p.to === "string" && p.to.startsWith("p")) {
+            const pIdx = parseInt(p.to[1]);
+            sim.pools[pIdx].commonsBalance += p.amount;
+            processPoolCommons(pIdx, p.amount, ts);
+          } else if (p.to === "mc") {
+            sim.metaCommonsBalance += p.amount;
+            processMetaCommons(p.amount, ts);
+          }
+        } else {
+          // Pool-level delivery
+          const pIdx = parseInt(p.level.replace("pool", ""));
+          const pool = sim.pools[pIdx];
+          const nodeIdx = p.to;
+
+          const prevBal = pool.balances[nodeIdx];
+          pool.balances[nodeIdx] += p.amount;
+          const th = threshRef.current.pools[pIdx].nodes[nodeIdx];
+          const fromCommons = typeof p.from === "string" && p.from.startsWith("c");
+          const effCR = fromCommons ? 0 : commonsRate;
+          const { toCommons, toField, newBalance } = FlowMath.onReceipt(prevBal, p.amount, th.min, th.max, fieldRate, effCR);
+          pool.balances[nodeIdx] = newBalance;
+
+          if (toCommons >= 1) {
+            sim.flights.push({ id: _fid++, from: nodeIdx, to: `c${pIdx}`, startMs: ts, amount: toCommons, level: p.level });
+            pool.commonsBalance += toCommons;
+            processPoolCommons(pIdx, toCommons, ts);
+          }
+          if (toField >= 1) {
+            const flows = POOL_TOPOS[pIdx].flows[nodeIdx];
+            if (flows && flows.length > 0) {
+              const poolNodeTh = threshRef.current.pools[pIdx].nodes;
+              const getDeficit = id => Math.max(0, poolNodeTh[id].min - pool.balances[id]);
+              const getRoom = id => Math.max(0, poolNodeTh[id].max - pool.balances[id]);
+              const { allocs, unroutable } = routeByActivation(toField, flows, getDeficit, getRoom);
+              for (const { id: to, amount } of allocs) {
+                if (amount >= 1) {
+                  sim.flights.push({ id: _fid++, from: nodeIdx, to, startMs: ts, amount, level: p.level });
+                  newP.push({ to, amount, deliverAt: ts + CFG.timing.travelMs, from: nodeIdx, level: p.level });
+                }
+              }
+              // Peers full → surplus to commons
+              if (unroutable >= 1) {
+                sim.flights.push({ id: _fid++, from: nodeIdx, to: `c${pIdx}`, startMs: ts, amount: unroutable, level: p.level });
+                pool.commonsBalance += unroutable;
+                processPoolCommons(pIdx, unroutable, ts);
+              }
+            }
+          }
+        }
+      }
+
+      sim.pending = [...still, ...newP];
+      sim.flights = sim.flights.filter(f => ts - f.startMs < CFG.timing.travelMs + 80);
+
+      setSnap({
+        pools: sim.pools.map(p => ({ balances: new Float64Array(p.balances), commonsBalance: p.commonsBalance })),
+        metaCommonsBalance: sim.metaCommonsBalance,
+        flights: [...sim.flights],
+        pendingTotal: sim.pending.reduce((s, p) => s + p.amount, 0),
+        ts,
+        totalInjected: sim.totalInjected,
+      });
+
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [processPoolCommons, processMetaCommons]);
+
+  return {
+    snap, params, thresholds, commonsFlows, metaFlows, metaCommonsFlows, log, commonsRipples,
+    setParam, setThreshold, setPoolCommonsFlow, setMetaFlow, setMetaCommonsFlow,
+    injectNode, injectPoolCommons, injectMetaCommons,
+    fillNodeToMax, fillPoolCommonsToMax, fillMetaCommonsToMax,
+    reset, appendLog, triggerRipple,
+  };
+}
+
+// ── Demo Hook ───────────────────────────────────────────────────────────────
+function useDemo(injectNode) {
+  const [active, setActive] = useState(false);
+  const ref = useRef(false);
+  useEffect(() => {
+    ref.current = active;
+    if (!active) return;
+    let timer, idx = 0;
+    const targets = [
+      [0, 0], [0, 5], [1, 0], [1, 5], [0, 3], [1, 3], [0, 7], [1, 7], [0, 1], [1, 9],
+    ];
+    const tick = () => {
+      if (!ref.current) return;
+      const [p, n] = targets[idx % targets.length];
+      injectNode(p, n, true);
+      idx++;
+      timer = setTimeout(tick, CFG.demo.intervalMs);
+    };
+    timer = setTimeout(tick, CFG.demo.startMs);
+    return () => clearTimeout(timer);
+  }, [active, injectNode]);
+  return [active, setActive];
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 6: ACTIVE EDGE EXTRACTION                                          ║
+// ║  Converts raw flight data into deduplicated edge list for rendering.        ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+function useActiveEdges(flights, ts, levelFilter) {
+  return useMemo(() => {
+    const map = new Map();
+    for (const fl of flights) {
+      if (fl.level !== levelFilter) continue;
+      const key = `${fl.from}-${fl.to}`;
+      const progress = Math.min(1, (ts - fl.startMs) / CFG.timing.travelMs);
+      if (!map.has(key) || map.get(key).progress < progress)
+        map.set(key, { from: fl.from, to: fl.to, progress, amount: fl.amount });
+    }
+    return [...map.values()];
+  }, [flights, ts, levelFilter]);
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 7: LEVEL VIEW NORMALIZER                                           ║
+// ║  Transforms pool-level or meta-level data into the same shape.              ║
+// ║  The canvas and panels never know which level they're rendering.             ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+function buildLevelView(zoom, snap, thresholds, sim, commonsFlows, metaFlows, metaCommonsFlows, commonsRipples) {
+
+  // ── META LEVEL: pool commons are nodes ─────────────────────────────────
+  if (zoom === "meta") {
+    return {
+      levelId: "meta",
+      nodeCount: CFG.poolCount,
+      flightLevel: "meta",
+      // At meta level, each "node" IS a pool commons
+      nodes: POOL_DEFS.map((p, i) => ({
+        id: i, name: p.label, shortName: p.short.replace("POOL ", ""),
+        balance: snap.pools[i].commonsBalance,
+        min: thresholds.pools[i].commons.min, max: thresholds.pools[i].commons.max,
+        cluster: i, flows: metaFlows[i],
+      })),
+      clusters: POOL_DEFS.map(p => ({ name: p.label, color: p.color })),
+      positions: POOL_DEFS.map((_, i) => polarXY(i, CFG.poolCount, CX, CY, CFG.orbits.nodeR)),
+      flowGraph: metaFlows,
+      commons: {
+        balance: snap.metaCommonsBalance,
+        min: thresholds.meta.commons.min, max: thresholds.meta.commons.max,
+        label1: "META", label2: "COMMONS", flows: metaCommonsFlows,
+      },
+      ripples: commonsRipples.filter(r => r.level === "meta"),
+      normalizeId: (id) => {
+        if (typeof id === "string") {
+          if (id === "mc") return "commons";
+          if (id.startsWith("p")) return parseInt(id[1]);
+        }
+        return id;
+      },
+      outer: null,
+      actions: {
+        injectNode: (id) => sim.injectPoolCommons(id),
+        injectCommons: () => sim.injectMetaCommons(),
+        fillNode: (id) => sim.fillPoolCommonsToMax(id),
+        fillCommons: () => sim.fillMetaCommonsToMax(),
+        setNodeTh: (id, f, v) => sim.setThreshold(["pools", id, "commons"], f, v),
+        setCommonsTh: (f, v) => sim.setThreshold(["meta", "commons"], f, v),
+        setCommonsFlow: (slot, nId) => sim.setMetaCommonsFlow(slot, nId),
+      },
+    };
+  }
+
+  // ── POOL LEVEL: people are nodes ────────────────────────────────────────
+  const poolIdx = zoom;
+  const topo = POOL_TOPOS[poolIdx];
+  const poolSnap = snap.pools[poolIdx];
+  const poolTh = thresholds.pools[poolIdx];
+
+  return {
+    levelId: `pool${poolIdx}`,
+    nodeCount: CFG.poolSize,
+    flightLevel: `pool${poolIdx}`,
+    nodes: topo.nodes.map((n, i) => ({
+      id: i, name: n.name, shortName: n.name.slice(0, 3).toUpperCase(),
+      balance: poolSnap.balances[i],
+      min: poolTh.nodes[i].min, max: poolTh.nodes[i].max,
+      cluster: n.cluster, flows: n.flows,
+    })),
+    clusters: topo.clusters,
+    positions: topo.positions,
+    flowGraph: topo.flows,
+    commons: {
+      balance: poolSnap.commonsBalance,
+      min: poolTh.commons.min, max: poolTh.commons.max,
+      label1: POOL_DEFS[poolIdx].short, label2: "COMMONS",
+      flows: commonsFlows[poolIdx],
+    },
+    ripples: commonsRipples.filter(r => r.level === `pool${poolIdx}`),
+    normalizeId: (id) => {
+      if (typeof id === "string") {
+        if (id.startsWith("c")) return "commons";
+      }
+      return id;
+    },
+    // Outer context: sibling pool commons + meta commons
+    outer: {
+      siblings: POOL_DEFS.filter(p => p.id !== poolIdx).map(p => ({
+        id: p.id, label: p.short, color: p.color,
+        balance: snap.pools[p.id].commonsBalance,
+      })),
+      metaCommons: { balance: snap.metaCommonsBalance, th: thresholds.meta.commons },
+      metaFlights: snap.flights.filter(f => f.level === "meta"),
+    },
+    actions: {
+      injectNode: (id) => sim.injectNode(poolIdx, id),
+      injectCommons: () => sim.injectPoolCommons(poolIdx),
+      fillNode: (id) => sim.fillNodeToMax(poolIdx, id),
+      fillCommons: () => sim.fillPoolCommonsToMax(poolIdx),
+      setNodeTh: (id, f, v) => sim.setThreshold(["pools", poolIdx, "nodes", id], f, v),
+      setCommonsTh: (f, v) => sim.setThreshold(["pools", poolIdx, "commons"], f, v),
+      setCommonsFlow: (slot, nId) => sim.setPoolCommonsFlow(poolIdx, slot, nId),
+    },
+  };
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 8: SVG PRIMITIVES                                                  ║
+// ║  Small, reusable SVG building blocks. Stateless.                            ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+function SvgDefs() {
+  return (
+    <defs>
+      <filter id="glow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="6" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
+      <filter id="softglow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="2.5" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
+      <filter id="nglow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="3.5" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
+      <marker id="arrFlow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><polygon points="0 0,6 3,0 6" fill="#fcd34d" opacity="0.9" /></marker>
+      <marker id="arrMeta" markerWidth="5" markerHeight="5" refX="4.5" refY="2.5" orient="auto"><polygon points="0 0,5 2.5,0 5" fill="#c084fc" opacity="0.7" /></marker>
+      {LAYER_COLORS.map((col, i) => (
+        <marker key={i} id={`arrL${i}`} markerWidth="5" markerHeight="5" refX="4.5" refY="2.5" orient="auto"><polygon points="0 0,5 2.5,0 5" fill={col} opacity="0.6" /></marker>
+      ))}
+    </defs>
+  );
+}
+
+// Orbit ring — a dashed circle representing an orbit path
+function OrbitRing({ r, stroke = "#0d1f40", width = 1, dash = "3 8", opacity = 1 }) {
+  return <circle cx={CX} cy={CY} r={r} fill="none" stroke={stroke} strokeWidth={width} strokeDasharray={dash} opacity={opacity} />;
+}
+
+// Membrane — a labeled boundary ring. Each holonic level has one.
+function Membrane({ r, label, color = "#0d1f40", opacity = 0.4 }) {
+  const id = `mem-${r}`;
+  return (
+    <g>
+      <circle cx={CX} cy={CY} r={r} fill="none" stroke={color} strokeWidth={1.5} strokeDasharray="6 4" opacity={opacity} />
+      {label && <>
+        <defs>
+          <path id={id} d={`M${CX - r},${CY} A${r},${r} 0 0,1 ${CX + r},${CY}`} />
+        </defs>
+        <text fontSize={7} fontWeight={600} fill={color} opacity={opacity * 1.5} letterSpacing="0.18em">
+          <textPath href={`#${id}`} startOffset="50%" textAnchor="middle" style={{ pointerEvents: "none" }}>
+            {label}
+          </textPath>
+        </text>
+      </>}
+    </g>
+  );
+}
+
+// Commons pool circle at center of any level — flashes on receipt
+function CommonsNode({ r, balance, min, max, selected, label1, label2, ripples, onClick }) {
+  const col = nodeColor(balance, min, max);
+  const pct = Math.min(1, Math.max(0, max > min ? (balance - min) / (max - min) : 0));
+  const isFull = balance >= max;
+
+  const prevBal = useRef(balance);
+  const [flash, setFlash] = useState(false);
+  useEffect(() => {
+    if (Math.abs(balance - prevBal.current) > 0.5) {
+      setFlash(true);
+      const t = setTimeout(() => setFlash(false), 400);
+      prevBal.current = balance;
+      return () => clearTimeout(t);
+    }
+    prevBal.current = balance;
+  }, [balance]);
+
+  return (
+    <g onClick={onClick} style={{ cursor: "pointer" }}>
+      {(ripples || []).map(rp => (
+        <circle key={rp.id} cx={CX} cy={CY} fill="none" stroke="#a3e635"
+          style={{ animation: "membraneripple 1.3s cubic-bezier(0.2,0,0.6,1) forwards" }} />
+      ))}
+      {isFull && <circle cx={CX} cy={CY} r={r + 16} fill="none" stroke={col} strokeWidth={2} style={{ animation: "overpulse 1.4s ease-in-out infinite" }} />}
+      {flash && <circle cx={CX} cy={CY} r={r + 10} fill="none" stroke="#fef3c7" strokeWidth={2.5} opacity={0.7} style={{ animation: "receiptflash 0.4s ease-out forwards" }} />}
+      <circle cx={CX} cy={CY} r={r + 6} fill="none" stroke={col} strokeWidth={selected ? 3 : 2} opacity={selected ? 0.9 : 0.5} filter={selected ? "url(#nglow)" : "none"} />
+      <circle cx={CX} cy={CY} r={r} fill="#05091a" />
+      <circle cx={CX} cy={CY} r={r} fill={col} opacity={0.15 + pct * 0.5} />
+      <text x={CX} y={CY - (label2 ? 7 : 0)} textAnchor="middle" dominantBaseline="central" fontSize={9} fontWeight={800} fill={balance > 0 ? col : "#1e3554"} style={{ pointerEvents: "none", letterSpacing: "0.06em" }}>{label1}</text>
+      {label2 && <text x={CX} y={CY + 6} textAnchor="middle" dominantBaseline="central" fontSize={8} fontWeight={800} fill={balance > 0 ? col : "#1e3554"} style={{ pointerEvents: "none", letterSpacing: "0.06em" }}>{label2}</text>}
+      {balance > 0 && <text x={CX} y={CY + r + 13} textAnchor="middle" fontSize={9} fontWeight={700} fill={flash ? "#fef3c7" : col} opacity={0.85}>{fmtBal(balance)}</text>}
+    </g>
+  );
+}
+
+// Satellite node on any orbit — flashes on receipt
+function SatelliteNode({ x, y, r, name, balance, min, max, selected, layerIdx, dimmed, onClick }) {
+  const col = nodeColor(balance, min, max);
+  const state = getState(balance, min, max);
+  const hasL = layerIdx !== undefined;
+  const nr = selected ? r * 1.5 : hasL ? r * 1.12 : r;
+  const op = selected ? 1 : hasL ? 1 : dimmed ? 0.28 : 0.85;
+  const fillC = hasL && !selected ? lerpHex(col, LAYER_COLORS[layerIdx], 0.3) : col;
+
+  // Flash on balance change
+  const prevBal = useRef(balance);
+  const [flash, setFlash] = useState(false);
+  useEffect(() => {
+    if (Math.abs(balance - prevBal.current) > 0.5) {
+      setFlash(true);
+      const t = setTimeout(() => setFlash(false), 400);
+      prevBal.current = balance;
+      return () => clearTimeout(t);
+    }
+    prevBal.current = balance;
+  }, [balance]);
+
+  return (
+    <g onClick={onClick} style={{ cursor: "pointer" }}>
+      {state === "full" && <circle cx={x} cy={y} r={nr + 12} fill="none" stroke={col} strokeWidth={1.5} style={{ animation: "overpulse 1.4s ease-in-out infinite" }} />}
+      {/* Receipt flash */}
+      {flash && <circle cx={x} cy={y} r={nr + 8} fill="none" stroke="#fef3c7" strokeWidth={2} opacity={0.7} style={{ animation: "receiptflash 0.4s ease-out forwards" }} />}
+      <circle cx={x} cy={y} r={nr + 4} fill="none" stroke={col} strokeWidth={selected ? 2.5 : 1.5} opacity={op * (selected ? 0.9 : hasL ? 0.6 : 0.35)} filter={selected ? "url(#nglow)" : "none"} />
+      <circle cx={x} cy={y} r={nr} fill={fillC} opacity={op} />
+      {balance > 0 && <text x={x} y={y - nr - 7} textAnchor="middle" fontSize={7} fontWeight={700} fill={flash ? "#fef3c7" : col} opacity={0.85}>{fmtBal(balance)}</text>}
+      <text x={x} y={y} textAnchor="middle" dominantBaseline="central" fontSize={selected ? 8 : 6.5} fontWeight={700} fill={dimmed ? "#0a1628" : "#05091a"} style={{ pointerEvents: "none", letterSpacing: "0.04em" }}>{name}</text>
+    </g>
+  );
+}
+
+// Ghost node on outer orbit (sibling pool or meta commons) — fainter, clickable
+function GhostNode({ x, y, r, label, balance, color, onClick }) {
+  return (
+    <g onClick={onClick} style={{ cursor: onClick ? "pointer" : "default" }}>
+      <circle cx={x} cy={y} r={r + 3} fill="none" stroke={color} strokeWidth={1} opacity={0.2} />
+      <circle cx={x} cy={y} r={r} fill={color} opacity={0.15} />
+      <text x={x} y={y} textAnchor="middle" dominantBaseline="central" fontSize={5.5} fontWeight={700} fill={color} opacity={0.55} style={{ pointerEvents: "none", letterSpacing: "0.05em" }}>{label}</text>
+      {balance > 0 && <text x={x} y={y + r + 10} textAnchor="middle" fontSize={7} fontWeight={700} fill={color} opacity={0.35}>{fmtBal(balance)}</text>}
+    </g>
+  );
+}
+
+// Animated flow edges (marching dashes)
+// Commons is ALWAYS visible — it connects to everything via tax/distribution.
+function FlowEdges({ edges, posOf, nodeLayerMap, hasSel }) {
+  return edges.map(({ from, to }) => {
+    const f = posOf(from), t = posOf(to);
+    if (!f || !t) return null;
+    const involvesCommons = from === "commons" || to === "commons";
+    const inR = !hasSel || involvesCommons || (nodeLayerMap[from] !== undefined && nodeLayerMap[to] !== undefined);
+    const dim = hasSel && !inR;
+    return (
+      <g key={`fe-${from}-${to}`}>
+        <path d={edgePath(f, t)} fill="none" stroke="#fcd34d" strokeWidth={dim ? 0.5 : 2} opacity={dim ? 0.06 : 0.3} filter={dim ? "none" : "url(#softglow)"} />
+        <path d={edgePath(f, t)} fill="none" stroke={dim ? "#1e3554" : "#fcd34d"} strokeWidth={dim ? 0.5 : 2} strokeDasharray="7 5" opacity={dim ? 0.1 : 0.85} markerEnd={dim ? undefined : "url(#arrFlow)"} style={{ animation: dim ? "none" : "march 0.4s linear infinite" }} />
+      </g>
+    );
+  });
+}
+
+// Animated particles traveling along edges
+// Commons is ALWAYS visible — never hidden by selection.
+function FlowParticles({ edges, posOf, nodeLayerMap, hasSel }) {
+  return edges.map(({ from, to, progress }) => {
+    const involvesCommons = from === "commons" || to === "commons";
+    const inR = !hasSel || involvesCommons || (nodeLayerMap[from] !== undefined && nodeLayerMap[to] !== undefined);
+    if (hasSel && !inR) return null;
+    const f = posOf(from), t = posOf(to);
+    if (!f || !t) return null;
+    return [0, 0.42].map((off, pi) => {
+      const { x, y } = bezAt(f, t, (progress + off) % 1);
+      return <circle key={`pt-${from}-${to}-${pi}`} cx={x} cy={y} r={pi === 0 ? 4 : 2.5} fill={pi === 0 ? "#fef3c7" : "#fcd34d"} opacity={pi === 0 ? 0.9 : 0.55} filter="url(#glow)" />;
+    });
+  });
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 9: LEVEL CANVAS                                                    ║
+// ║  The SINGLE canvas component. Self-similar at every holonic level.          ║
+// ║                                                                              ║
+// ║  Visual structure (concentric orbits from center outward):                  ║
+// ║    1. Commons pool at CX,CY                                                 ║
+// ║    2. Satellite nodes on orbits.nodeR                                        ║
+// ║    3. Membrane ring around the node orbit                                    ║
+// ║    4. [If outer exists] Sibling pools on orbits.siblingR                    ║
+// ║    5. [If outer exists] Meta commons on orbits.metaR                        ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+function LevelCanvas({ view, snap, sel, setSel, onNodeDrill, onZoomOut, onZoomToPool }) {
+  const { nodes, clusters, positions, commons, ripples, normalizeId, flightLevel, outer } = view;
+  const N = view.nodeCount;
+  const npc = Math.ceil(N / clusters.length);
+
+  // ── Normalize flight IDs to canvas IDs ────────────────────────────────
+  const rawEdges = useActiveEdges(snap.flights, snap.ts, flightLevel);
+  const activeEdges = useMemo(() => rawEdges.map(e => ({
+    ...e, from: normalizeId(e.from), to: normalizeId(e.to),
+  })), [rawEdges, normalizeId]);
+
+  // ── Selection ripple (BFS from selected node) ────────────────────────
+  const isNodeSel = typeof sel === "number";
+  const ripple = useMemo(() => isNodeSel ? bfsLayers(sel, view.flowGraph) : null, [sel, isNodeSel, view.flowGraph]);
+  const nodeLayerMap = useMemo(() => {
+    const m = {};
+    if (ripple) ripple.forEach((l, li) => l.forEach(id => { m[id] = li; }));
+    return m;
+  }, [ripple]);
+
+  // ── Outer context positions (must be defined before posOf) ────────────
+  const metaCommonsPos = useMemo(() => ({ x: CX, y: CY - CFG.orbits.metaR }), []);
+  const siblingPositions = useMemo(() => {
+    if (!outer) return [];
+    return outer.siblings.map((sib, i) => {
+      const angle = (2 * Math.PI * i) / Math.max(outer.siblings.length, 1) + Math.PI / 4;
+      return { ...sib, x: CX + CFG.orbits.siblingR * Math.cos(angle), y: CY + CFG.orbits.siblingR * Math.sin(angle) };
+    });
+  }, [outer]);
+
+  // ── Position resolver for this level's flights ────────────────────────
+  const posOf = useCallback((id) => {
+    if (id === "commons") return COMMONS_POS;
+    return positions[id] || COMMONS_POS;
+  }, [positions]);
+
+  // Meta-level edge position resolver.
+  // This pool → center (COMMONS_POS). Siblings → their orbit positions. Meta commons → top.
+  const metaPosOf = useCallback((id) => {
+    if (id === "mc") return metaCommonsPos;
+    if (typeof id === "string" && id.startsWith("p")) {
+      const pIdx = parseInt(id[1]);
+      const sib = siblingPositions.find(s => s.id === pIdx);
+      if (sib) return { x: sib.x, y: sib.y };
+      return COMMONS_POS; // this pool → center of canvas
+    }
+    return metaCommonsPos;
+  }, [siblingPositions, metaCommonsPos]);
+
+  const outerEdges = useMemo(() => {
+    if (!outer) return [];
+    return outer.metaFlights
+      .filter(f => snap.ts - f.startMs < CFG.timing.travelMs + 80)
+      .map(f => ({ from: f.from, to: f.to, progress: Math.min(1, (snap.ts - f.startMs) / CFG.timing.travelMs) }));
+  }, [outer, snap.ts]);
+
+  return (
+    <svg width={W} height={H} style={{ display: "block" }}>
+      <SvgDefs />
+
+      {/* ── MEMBRANE 3: Meta-level boundary (outermost) ── */}
+      {outer && <>
+        <Membrane r={CFG.orbits.metaR + 14} label="META NETWORK" color="#c084fc" opacity={0.25} />
+        <OrbitRing r={CFG.orbits.metaR} stroke="#c084fc" width={0.5} dash="2 10" opacity={0.06} />
+        <GhostNode x={metaCommonsPos.x} y={metaCommonsPos.y} r={CFG.orbits.metaSize}
+          label="META" balance={outer.metaCommons.balance}
+          color={nodeColor(outer.metaCommons.balance, outer.metaCommons.th.min, outer.metaCommons.th.max)}
+          onClick={onZoomOut} />
+      </>}
+
+      {/* ── MEMBRANE 2: Inter-pool boundary ── */}
+      {outer && <>
+        <Membrane r={CFG.orbits.siblingR + 14} label="INTER-POOL" color="#475569" opacity={0.2} />
+        <OrbitRing r={CFG.orbits.siblingR} stroke="#1e3554" width={0.5} dash="2 10" opacity={0.08} />
+        {siblingPositions.map(sib => (
+          <GhostNode key={sib.id} x={sib.x} y={sib.y} r={CFG.orbits.siblingSize}
+            label={sib.label.replace("POOL ", "")} balance={sib.balance} color={sib.color}
+            onClick={() => onZoomToPool && onZoomToPool(sib.id)} />
+        ))}
+
+        {/* Meta-level inter-pool flow edges — prominent */}
+        {outerEdges.map(({ from, to, progress }) => {
+          const f = metaPosOf(from), t = metaPosOf(to);
+          if (!f || !t) return null;
+          return (
+            <g key={`ofe-${from}-${to}`}>
+              <path d={edgePath(f, t)} fill="none" stroke="#c084fc" strokeWidth={2.5} opacity={0.15} filter="url(#softglow)" />
+              <path d={edgePath(f, t)} fill="none" stroke="#c084fc" strokeWidth={2} strokeDasharray="8 5" opacity={0.6} markerEnd="url(#arrMeta)" style={{ animation: "march 0.5s linear infinite" }} />
+              {[0, 0.45].map((off, pi) => {
+                const { x, y } = bezAt(f, t, (progress + off) % 1);
+                return <circle key={pi} cx={x} cy={y} r={pi === 0 ? 4.5 : 3} fill={pi === 0 ? "#e9d5ff" : "#c084fc"} opacity={pi === 0 ? 0.9 : 0.6} filter="url(#glow)" />;
+              })}
+            </g>
+          );
+        })}
+      </>}
+
+      {/* ── MEMBRANE 1: This pool's boundary ── */}
+      <Membrane r={CFG.orbits.nodeR + 14} label={commons.label1 + " MEMBRANE"} color="#0d1f40" opacity={0.5} />
+
+      {/* ── Cluster arcs (subtle tints on the node orbit) ── */}
+      {clusters.map((cl, c) => {
+        const r = CFG.orbits.nodeR + 20;
+        const start = c * npc, end = Math.min(start + npc - 1, N - 1);
+        const s = (2 * Math.PI * start) / N - Math.PI / 2;
+        const e = (2 * Math.PI * end) / N - Math.PI / 2;
+        return <path key={c} d={`M${CX + r * Math.cos(s)},${CY + r * Math.sin(s)} A${r},${r} 0 ${Math.abs(e - s) > Math.PI ? 1 : 0},1 ${CX + r * Math.cos(e)},${CY + r * Math.sin(e)}`} fill="none" stroke={cl.color} strokeWidth={1.5} opacity={0.18} />;
+      })}
+
+      {/* ── ORBIT 1: Node orbit ring (faint guide) ── */}
+      <OrbitRing r={CFG.orbits.nodeR} stroke="#0d1f40" width={0.5} dash="1 8" opacity={0.3} />
+
+      {/* ── CENTER: Commons pool ── */}
+      <CommonsNode r={CFG.orbits.commonsR}
+        balance={commons.balance} min={commons.min} max={commons.max}
+        selected={sel === "commons"} label1={commons.label1} label2={commons.label2}
+        ripples={ripples}
+        onClick={() => sel === "commons" ? view.actions.injectCommons() : setSel("commons")} />
+
+      {/* ── Flow edges between nodes ── */}
+      <FlowEdges edges={activeEdges} posOf={posOf} nodeLayerMap={nodeLayerMap} hasSel={isNodeSel} />
+
+      {/* ── Ripple topology edges (dashed, when node selected) ── */}
+      {ripple && ripple.slice(0, -1).map((layer, li) =>
+        layer.map(from =>
+          (view.flowGraph[from] || [])
+            .filter(to => ripple[li + 1]?.includes(to))
+            .filter(to => !activeEdges.some(e => e.from === from && e.to === to))
+            .map(to => <path key={`rip-${from}-${to}`} d={edgePath(positions[from], positions[to])} fill="none" stroke={LAYER_COLORS[li]} strokeWidth={li === 0 ? 1.8 : 1.2} strokeDasharray="3 6" opacity={0.4} markerEnd={`url(#arrL${li})`} />)
+        )
+      )}
+
+      {/* ── Flow particles ── */}
+      <FlowParticles edges={activeEdges} posOf={posOf} nodeLayerMap={nodeLayerMap} hasSel={isNodeSel} />
+
+      {/* ── Satellite nodes on ORBIT 1 ── */}
+      {nodes.map((node, i) => (
+        <SatelliteNode key={i} x={positions[i].x} y={positions[i].y} r={CFG.orbits.nodeSize}
+          name={node.shortName} balance={node.balance} min={node.min} max={node.max}
+          selected={sel === i} layerIdx={nodeLayerMap[i]}
+          dimmed={sel !== null && nodeLayerMap[i] === undefined}
+          onClick={() => sel === i ? (onNodeDrill ? onNodeDrill(i) : view.actions.injectNode(i)) : setSel(i)} />
+      ))}
+    </svg>
+  );
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 10: REUSABLE PANEL COMPONENTS                                      ║
+// ║  Small building blocks for the side panel. Stateless.                       ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+const S = {
+  panel: { background: "#03060f", borderRadius: 4, border: "1px solid #0d1f40" },
+  label: { fontSize: 7, letterSpacing: "0.14em", color: "#1e3554" },
+};
+
+function HoverBtn({ onClick, bg, hoverBg, color, border, style, children }) {
+  return (
+    <button onClick={onClick}
+      style={{ background: bg, border: border || "none", borderRadius: 5, cursor: "pointer", color, fontFamily: "inherit", ...style }}
+      onMouseEnter={e => e.currentTarget.style.background = hoverBg}
+      onMouseLeave={e => e.currentTarget.style.background = bg}>{children}</button>
+  );
+}
+
+function PanelHeader({ title, subtitle, color, onBack }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+      <div>
+        <div style={{ fontSize: 20, fontWeight: 700, color, letterSpacing: "-0.02em" }}>{title}</div>
+        <div style={{ ...S.label }}>{subtitle}</div>
+      </div>
+      {onBack && <button onClick={onBack} style={{ ...S.panel, color: "#334155", padding: "4px 10px", cursor: "pointer", fontSize: 9, fontFamily: "inherit" }}>← BACK</button>}
+    </div>
+  );
+}
+
+function BalanceBar({ balance, min, max, color }) {
+  const pct = Math.min(100, max > 0 ? (balance / max) * 100 : 0);
+  const minPct = Math.min(100, max > 0 ? (min / max) * 100 : 0);
+  const state = getState(balance, min, max);
+  const toMax = Math.max(0, max - balance);
+  return (
+    <div style={{ ...S.panel, padding: "12px 14px", marginBottom: 10, borderLeft: `3px solid ${color}`, border: `1px solid ${color}20` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, marginBottom: 6, color: "#475569" }}>
+        <span style={{ color: TRAFFIC.deficit }}>MIN ${min.toLocaleString()}</span>
+        <span style={{ color: "#f1f5f9", fontWeight: 700, fontSize: 12 }}>${Math.round(balance).toLocaleString()}</span>
+        <span style={{ color: TRAFFIC.atMax }}>MAX ${max.toLocaleString()}</span>
+      </div>
+      <div style={{ height: 12, background: "#0d1f40", borderRadius: 6, position: "relative", overflow: "hidden" }}>
+        <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${pct}%`, background: `linear-gradient(90deg, ${TRAFFIC.deficit}, ${color})`, borderRadius: 6, transition: "width 0.4s ease" }} />
+        <div style={{ position: "absolute", top: 0, left: `${minPct}%`, width: 2, height: "100%", background: `${TRAFFIC.deficit}80` }} />
+      </div>
+      <div style={{ fontSize: 9, marginTop: 6, color }}>
+        {state === "deficit" && `↓ $${Math.round(min - balance).toLocaleString()} to minimum`}
+        {state === "flowing" && `↑ $${Math.round(toMax).toLocaleString()} to maximum · flowing`}
+        {state === "full" && `At maximum · routing 100% of surplus outward`}
+      </div>
+    </div>
+  );
+}
+
+function ThresholdEditor({ value, onChange }) {
+  return (
+    <div style={{ display: "flex", gap: 8, marginTop: 10, marginBottom: 10 }}>
+      {[["min", TRAFFIC.deficit, "MIN"], ["max", TRAFFIC.atMax, "MAX"]].map(([f, c, l]) => (
+        <div key={f} style={{ flex: 1 }}>
+          <div style={{ fontSize: 7, color: c, letterSpacing: "0.1em", marginBottom: 3 }}>{l}</div>
+          <input type="number" value={value[f]} step={1000} onChange={e => onChange(f, e.target.value)}
+            style={{ width: "100%", boxSizing: "border-box", background: "#0d1f40", border: `1px solid ${c}40`, borderRadius: 4, color: c, fontSize: 10, fontWeight: 700, padding: "4px 6px", fontFamily: "monospace", outline: "none" }} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ActionButtons({ onInject, amt, onFill, showFill }) {
+  return (
+    <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+      <HoverBtn onClick={onInject} bg="#fcd34d" hoverBg="#fbbf24" color="#05091a"
+        style={{ flex: 1, padding: "9px 0", fontSize: 10, fontWeight: 700, letterSpacing: "0.05em" }}>
+        ⚡ +${amt.toLocaleString()}
+      </HoverBtn>
+      {showFill && (
+        <HoverBtn onClick={onFill} bg="transparent" hoverBg="#c084fc15" color="#c084fc" border="1px solid #c084fc50"
+          style={{ flex: 1, padding: "9px 0", fontSize: 9, fontWeight: 700, letterSpacing: "0.04em" }}>FILL TO MAX</HoverBtn>
+      )}
+    </div>
+  );
+}
+
+const FlowLog = memo(function FlowLog({ log }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!log.length) return null;
+  const recent = log.slice(0, 12);
+  const logText = log.join("\n");
+  return (
+    <div style={{ ...S.panel, padding: "8px 12px", marginBottom: 10, borderLeft: "3px solid #fcd34d", border: "1px solid #fcd34d15" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <div style={{ ...S.label, color: "#fcd34d", letterSpacing: "0.18em" }}>FLOW LOG ({log.length})</div>
+        <button onClick={() => setExpanded(e => !e)}
+          style={{ background: expanded ? "#fcd34d20" : "#0d1f40", border: "1px solid #fcd34d60", borderRadius: 4, color: "#fcd34d", fontSize: 10, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", padding: "4px 12px", letterSpacing: "0.06em" }}>
+          {expanded ? "▲ HIDE LOG" : "📋 COPY LOG"}
+        </button>
+      </div>
+      {recent.map((l, i) => (
+        <div key={i} style={{ fontSize: 9, marginBottom: 2, color: i === 0 ? "#fef9c3" : `rgba(100,116,139,${Math.max(0.15, 1 - i * 0.1)})`, animation: i === 0 ? "slideup 0.3s ease" : "none" }}>{l}</div>
+      ))}
+      {expanded && (
+        <textarea readOnly value={logText}
+          onClick={e => e.target.select()}
+          style={{ width: "100%", boxSizing: "border-box", height: 200, marginTop: 8, background: "#05091a", border: "1px solid #1e3554", borderRadius: 4, color: "#94a3b8", fontSize: 9, fontFamily: "'IBM Plex Mono', monospace", padding: 8, resize: "vertical", outline: "none" }} />
+      )}
+    </div>
+  );
+});
+
+function ParamSlider({ label, hint, value, min, max, step, format, onChange }) {
+  const pct = ((value - min) / (max - min)) * 100;
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+        <span style={{ fontSize: 8, color: "#94a3b8", letterSpacing: "0.08em" }}>{label}</span>
+        <span style={{ fontSize: 9, fontWeight: 700, color: "#fcd34d", fontFamily: "monospace" }}>{format(value)}</span>
+      </div>
+      <div style={{ position: "relative", height: 18 }}>
+        <div style={{ position: "absolute", top: 7, left: 0, right: 0, height: 4, borderRadius: 2, background: "#0d1f40" }} />
+        <div style={{ position: "absolute", top: 7, left: 0, width: `${pct}%`, height: 4, borderRadius: 2, background: "linear-gradient(90deg, #38bdf8, #fcd34d)" }} />
+        <input type="range" min={min} max={max} step={step} value={value} onChange={e => onChange(parseFloat(e.target.value))}
+          style={{ position: "absolute", top: 0, left: 0, width: "100%", height: 18, opacity: 0, cursor: "pointer", margin: 0 }} />
+      </div>
+      <div style={{ fontSize: 7, color: "#1e3554", marginTop: 2 }}>{hint}</div>
+    </div>
+  );
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 11: UNIFIED SIDE PANELS                                            ║
+// ║  Same panel renders for person nodes and pool nodes.                        ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+function NodePanel({ nodeId, view, snap, setSel, onDrill }) {
+  const node = view.nodes[nodeId];
+  const col = nodeColor(node.balance, node.min, node.max);
+  const state = getState(node.balance, node.min, node.max);
+  const toMax = Math.max(0, node.max - node.balance);
+  const ripple = useMemo(() => bfsLayers(nodeId, view.flowGraph), [nodeId, view.flowGraph]);
+  const totalReach = ripple.slice(1).reduce((s, l) => s + l.length, 0);
+  const rawEdges = useActiveEdges(snap.flights, snap.ts, view.flightLevel);
+  const activeEdges = useMemo(() => rawEdges.map(e => ({ ...e, from: view.normalizeId(e.from), to: view.normalizeId(e.to) })), [rawEdges, view.normalizeId]);
+
+  return (
+    <div style={{ animation: "fadein 0.25s ease" }}>
+      <PanelHeader title={node.name} subtitle={`${(view.clusters[node.cluster]?.name || "").toUpperCase()} · ${state.toUpperCase()}`} color={col} onBack={() => setSel(null)} />
+      <BalanceBar balance={node.balance} min={node.min} max={node.max} color={col} />
+      <ThresholdEditor value={{ min: node.min, max: node.max }} onChange={(f, v) => view.actions.setNodeTh(nodeId, f, v)} />
+
+      {/* Declared flows */}
+      <div style={{ ...S.panel, padding: "10px 12px", marginBottom: 10 }}>
+        <div style={{ ...S.label, marginBottom: 8 }}>DECLARED SUPPORT FLOWS</div>
+        <div style={{ fontSize: 9, color: "#475569", marginBottom: 8, lineHeight: 1.6 }}>When {node.name} exceeds maximum, surplus flows to:</div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {node.flows.map(j => {
+            const peer = view.nodes[j]; if (!peer) return null;
+            const jCol = nodeColor(peer.balance, peer.min, peer.max);
+            const flowing = activeEdges.some(e => e.from === nodeId && e.to === j);
+            return (
+              <div key={j} onClick={() => setSel(j)} style={{ padding: "5px 10px", borderRadius: 4, background: `${jCol}18`, border: `1px solid ${flowing ? "#fcd34d" : jCol + "50"}`, cursor: "pointer", fontSize: 10, color: jCol, display: "flex", gap: 5, alignItems: "center" }}
+                onMouseEnter={e => e.currentTarget.style.background = `${jCol}30`}
+                onMouseLeave={e => e.currentTarget.style.background = `${jCol}18`}>
+                {peer.name}{flowing && <span style={{ color: "#fcd34d" }}>↝</span>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <ActionButtons onInject={() => view.actions.injectNode(nodeId)} amt={CFG.defaults.injectAmt}
+        onFill={() => view.actions.fillNode(nodeId)} showFill={toMax > 0} />
+
+      {/* Zoom into this node (meta level only) */}
+      {onDrill && (
+        <HoverBtn onClick={() => onDrill(nodeId)} bg="#0d1f40" hoverBg="#1e3554" color={col} border={`1px solid ${col}50`}
+          style={{ width: "100%", padding: "10px 0", fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", marginBottom: 10 }}>
+          ⬚ ZOOM INTO {node.name.toUpperCase()}
+        </HoverBtn>
+      )}
+
+      {/* Ripple hop layers */}
+      {[1, 2, 3].map(li => {
+        const ln = ripple[li] ?? [];
+        if (!ln.length) return null;
+        return (
+          <div key={li} style={{ ...S.panel, padding: "9px 11px", marginBottom: 6, borderLeft: `3px solid ${LAYER_COLORS[li]}`, border: `1px solid ${LAYER_COLORS[li]}18` }}>
+            <div style={{ ...S.label, color: LAYER_COLORS[li], marginBottom: 6 }}>HOP {li} · {ln.length} HOLONS</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+              {ln.map(id => { const n = view.nodes[id]; if (!n) return null; const c = nodeColor(n.balance, n.min, n.max);
+                return <div key={id} onClick={() => setSel(id)} style={{ padding: "3px 8px", background: `${c}15`, border: `1px solid ${c}45`, borderRadius: 3, fontSize: 9, color: c, cursor: "pointer" }}>{n.name}</div>; })}
+            </div>
+          </div>
+        );
+      })}
+
+      {/* Membrane reach */}
+      <div style={{ ...S.panel, padding: "10px 14px", marginTop: 2 }}>
+        <div style={{ ...S.label, marginBottom: 6 }}>MEMBRANE REACH</div>
+        <div style={{ display: "flex", gap: 20 }}>
+          {[{ l: "HOLONS", v: 1 + totalReach }, { l: "COVERAGE", v: `${Math.round((1 + totalReach) / view.nodeCount * 100)}%` }, { l: "UNREACHED", v: view.nodeCount - 1 - totalReach }].map(s => (
+            <div key={s.l}><div style={{ fontSize: 18, fontWeight: 700, color: "#94a3b8" }}>{s.v}</div><div style={{ ...S.label }}>{s.l}</div></div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CommonsPanel({ view, setSel }) {
+  const { commons, nodes: allNodes } = view;
+  const col = nodeColor(commons.balance, commons.min, commons.max);
+  const state = getState(commons.balance, commons.min, commons.max);
+  const toMax = Math.max(0, commons.max - commons.balance);
+  return (
+    <div style={{ animation: "fadein 0.25s ease" }}>
+      <PanelHeader title={`${commons.label1} ${commons.label2}`} subtitle={`SHARED MEMBRANE · ${state.toUpperCase()}`} color={col} onBack={() => setSel(null)} />
+      <BalanceBar balance={commons.balance} min={commons.min} max={commons.max} color={col} />
+      <ThresholdEditor value={{ min: commons.min, max: commons.max }} onChange={(f, v) => view.actions.setCommonsTh(f, v)} />
+      <ActionButtons onInject={() => view.actions.injectCommons()} amt={CFG.defaults.injectAmt}
+        onFill={() => view.actions.fillCommons()} showFill={toMax > 0} />
+      <div style={{ ...S.panel, padding: "10px 12px", marginBottom: 10 }}>
+        <div style={{ ...S.label, marginBottom: 8 }}>DECLARED RECIPIENTS</div>
+        {commons.flows.map((nId, slot) => (
+          <div key={slot} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+            <span style={{ fontSize: 8, color: "#334155", width: 14 }}>{slot + 1}.</span>
+            <select value={nId} onChange={e => view.actions.setCommonsFlow(slot, Number(e.target.value))}
+              style={{ flex: 1, background: "#0d1f40", border: "1px solid #1e3554", borderRadius: 4, color: "#94a3b8", fontSize: 9, padding: "4px 6px", fontFamily: "inherit", outline: "none", cursor: "pointer" }}>
+              {allNodes.map(n => <option key={n.id} value={n.id}>{n.name}</option>)}
+            </select>
+          </div>
+        ))}
+        <div style={{ fontSize: 8, color: "#1e3554", marginTop: 6, lineHeight: 1.6 }}>Surplus above max flows outward through declared recipients.</div>
+      </div>
+    </div>
+  );
+}
+
+function NodeList({ view, setSel }) {
+  const npc = Math.ceil(view.nodeCount / view.clusters.length);
+  return (
+    <div style={{ display: "grid", gap: 3 }}>
+      {view.clusters.map((cl, c) => (
+        <div key={c}>
+          <div style={{ fontSize: 7, letterSpacing: "0.16em", color: cl.color, marginBottom: 4, marginTop: c > 0 ? 8 : 0, paddingLeft: 4 }}>{cl.name.toUpperCase()}</div>
+          {view.nodes.filter(n => n.cluster === c).map(node => {
+            const col = nodeColor(node.balance, node.min, node.max);
+            return (
+              <div key={node.id} onClick={() => setSel(node.id)}
+                style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 10px", ...S.panel, borderLeft: `3px solid ${col}`, cursor: "pointer", marginBottom: 3 }}
+                onMouseEnter={e => e.currentTarget.style.background = "#080f1f"}
+                onMouseLeave={e => e.currentTarget.style.background = "#03060f"}>
+                <span style={{ fontSize: 10, color: "#cbd5e1", fontWeight: 600 }}>{node.name}</span>
+                <span style={{ fontSize: 9, color: col }}>${Math.round(node.balance).toLocaleString()}</span>
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 12: STYLES + PARAM DEFINITIONS                                     ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+const CSS = `
+  @keyframes march { to { stroke-dashoffset: -20; } }
+  @keyframes overpulse { 0%,100%{opacity:.2} 50%{opacity:.6} }
+  @keyframes fadein { from{opacity:0} to{opacity:1} }
+  @keyframes slideup { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+  @keyframes receiptflash {
+    0%   { opacity: 0.8; stroke-width: 3px; }
+    100% { opacity: 0;   stroke-width: 1px; }
+  }
+  @keyframes membraneripple {
+    0%   { r: 40px;  opacity: 0.2;  stroke-width: 1.5px; }
+    70%  { r: 170px; opacity: 0.5;  stroke-width: 2.5px; }
+    88%  { r: 200px; opacity: 1;    stroke-width: 5px;   }
+    95%  { r: 208px; opacity: 1;    stroke-width: 7px;   }
+    100% { r: 214px; opacity: 0;    stroke-width: 9px;   }
+  }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: #05091a; }
+  ::-webkit-scrollbar-thumb { background: #1e3554; border-radius: 2px; }
+`;
+
+const PARAM_DEFS = [
+  { key: "fieldRate", label: "Flow to Field", min: 0.01, max: 0.5, step: 0.01, fmt: v => `${Math.round(v * 100)}%`, hint: "% of new capital above min routed to declared field" },
+  { key: "commonsRate", label: "Commons Rate", min: 0.00, max: 0.30, step: 0.01, fmt: v => `${Math.round(v * 100)}%`, hint: "% of new capital diverted to commons (every level)" },
+  { key: "injectAmt", label: "Inject Size", min: 500, max: 10000, step: 500, fmt: v => `$${v.toLocaleString()}`, hint: "Capital per click or demo pulse" },
+];
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 13: APP                                                            ║
+// ║  Pure composition. One canvas, one panel structure, at every level.         ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+export default function App() {
+  const sim = useSimulation();
+  const { snap, params, thresholds, commonsFlows, metaFlows, metaCommonsFlows, log, commonsRipples } = sim;
+
+  // ── Navigation state ──────────────────────────────────────────────────
+  const [zoom, setZoom] = useState("meta");       // "meta" | poolIndex
+  const [sel, setSel] = useState(null);            // null | "commons" | nodeIndex
+  const [demo, setDemo] = useDemo(sim.injectNode);
+  const [showLog, setShowLog] = useState(false);
+
+  const zoomIn = useCallback((i) => { setZoom(i); setSel(null); }, []);
+  const zoomOut = useCallback(() => { setZoom("meta"); setSel(null); }, []);
+  const resetAll = useCallback(() => { sim.reset(); setSel(null); setDemo(false); }, [sim, setDemo]);
+
+  // ── Normalized level view ─────────────────────────────────────────────
+  const view = useMemo(() =>
+    buildLevelView(zoom, snap, thresholds, sim, commonsFlows, metaFlows, metaCommonsFlows, commonsRipples),
+    [zoom, snap, thresholds, sim, commonsFlows, metaFlows, metaCommonsFlows, commonsRipples]
+  );
+
+  // ── Derived counts ────────────────────────────────────────────────────
+  const counts = useMemo(() => {
+    let d = 0, f = 0, fl = 0;
+    for (const n of view.nodes) { const s = getState(n.balance, n.min, n.max); if (s === "deficit") d++; else if (s === "full") f++; else fl++; }
+    return { deficit: d, flowing: fl, full: f };
+  }, [view.nodes]);
+
+  const totalInNetwork = snap.pools.reduce((s, p) => s + p.balances.reduce((a, b) => a + b, 0) + p.commonsBalance, 0)
+    + snap.metaCommonsBalance;
+
+  const canDrill = zoom === "meta"; // can zoom into a node only at meta level
+
+  return (
+    <div style={{ display: "flex", minHeight: "100vh", background: "#05091a", fontFamily: "'IBM Plex Mono', 'Fira Code', monospace", color: "#e2e8f0" }}>
+      <style>{CSS}</style>
+
+      {/* ═══ CANVAS — same component at every level ═══ */}
+      <div style={{ flexShrink: 0 }}>
+        <LevelCanvas view={view} snap={snap} sel={sel} setSel={setSel}
+          onNodeDrill={canDrill ? zoomIn : null} onZoomOut={zoomOut} onZoomToPool={zoomIn} />
+      </div>
+
+      {/* ═══ SIDE PANEL — same structure at every level ═══ */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", borderLeft: "1px solid #0d1f40", maxHeight: "100vh", overflowY: "auto" }}>
+
+        {/* ── Header ── */}
+        <div style={{ padding: "16px 20px 12px", borderBottom: "1px solid #0d1f40", background: "#03060f", flexShrink: 0 }}>
+
+          {/* Breadcrumb */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+            <span onClick={zoomOut}
+              style={{ fontSize: 8, letterSpacing: "0.14em", color: zoom === "meta" ? "#f1f5f9" : "#334155", cursor: "pointer", padding: "2px 6px", borderRadius: 3, background: zoom === "meta" ? "#0d1f40" : "transparent" }}>
+              NETWORK
+            </span>
+            {zoom !== "meta" && <>
+              <span style={{ fontSize: 8, color: "#1e3554" }}>›</span>
+              <span style={{ fontSize: 8, letterSpacing: "0.14em", color: "#f1f5f9", padding: "2px 6px", borderRadius: 3, background: "#0d1f40" }}>{POOL_DEFS[zoom].short}</span>
+            </>}
+          </div>
+
+          {/* Title + controls */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+            <div>
+              <div style={{ fontSize: 7, letterSpacing: "0.22em", color: "#1e3554", marginBottom: 3 }}>THRESHOLD-BASED FLOW FUNDING</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: "#f1f5f9" }}>{view.nodeCount} Holons · {view.commons.label1}</div>
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              {zoom !== "meta" && <HoverBtn onClick={zoomOut} bg="transparent" hoverBg="#0d1f40" color="#94a3b8" border="1px solid #1e3554" style={{ padding: "5px 10px", fontSize: 9, fontWeight: 700, letterSpacing: "0.08em" }}>↑ NETWORK</HoverBtn>}
+              <button onClick={() => setDemo(d => !d)}
+                style={{ padding: "5px 10px", borderRadius: 4, cursor: "pointer", fontSize: 9, fontWeight: 700, fontFamily: "inherit", letterSpacing: "0.08em", background: demo ? `${TRAFFIC.atMax}20` : "transparent", border: `1px solid ${demo ? TRAFFIC.atMax : "#1e3554"}`, color: demo ? TRAFFIC.atMax : "#334155" }}>
+                {demo ? "◼ DEMO" : "▶ DEMO"}
+              </button>
+              <HoverBtn onClick={resetAll} bg="transparent" hoverBg="transparent" color="#334155" border="1px solid #1e3554" style={{ padding: "5px 10px", fontSize: 9, letterSpacing: "0.08em" }}>↺ RESET</HoverBtn>
+              {log.length > 0 && (
+                <button onClick={() => setShowLog(true)}
+                  style={{ padding: "5px 10px", borderRadius: 4, cursor: "pointer", fontSize: 9, fontWeight: 700, fontFamily: "inherit", letterSpacing: "0.08em", background: "#fcd34d20", border: "1px solid #fcd34d", color: "#fcd34d" }}>
+                  📋 LOG ({log.length})
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Traffic light counters */}
+          <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+            {[
+              { k: "deficit",  col: TRAFFIC.deficit,  l: "DEFICIT" },
+              { k: "flowing",  col: TRAFFIC.flowing,  l: "FLOWING" },
+              { k: "full",     col: TRAFFIC.atMax,    l: "AT MAX" },
+            ].map(({ k, col, l }) => (
+              <div key={k} style={{ flex: 1, background: "#05091a", borderRadius: 4, padding: "6px 8px", borderTop: `2px solid ${col}`, border: `1px solid ${col}18` }}>
+                <div style={{ fontSize: 20, fontWeight: 700, color: col }}>{counts[k]}</div>
+                <div style={{ fontSize: 7, color: "#1e3554", letterSpacing: "0.12em" }}>{l}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Traffic light scale */}
+          <div>
+            <div style={{ display: "flex", height: 7, borderRadius: 4, overflow: "hidden", marginBottom: 4 }}>
+              {[TRAFFIC.deficit, lerpHex(TRAFFIC.deficit, TRAFFIC.flowing, 0.5), TRAFFIC.flowing, lerpHex(TRAFFIC.flowing, TRAFFIC.atMax, 0.5), TRAFFIC.atMax].map((c, i) => <div key={i} style={{ flex: 1, background: c }} />)}
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 7, color: "#1e3554" }}>
+              <span>$0</span><span>MIN</span><span>→ flowing</span><span>MAX</span>
+            </div>
+          </div>
+
+          {/* Parameters */}
+          <div style={{ marginTop: 14, borderTop: "1px solid #1e3554", paddingTop: 12 }}>
+            <div style={{ fontSize: 8, letterSpacing: "0.14em", color: "#334155", marginBottom: 8 }}>FLOW PARAMETERS (ALL LEVELS)</div>
+            {PARAM_DEFS.map(p => (
+              <ParamSlider key={p.key} label={p.label} hint={p.hint} value={params[p.key]} min={p.min} max={p.max} step={p.step} format={p.fmt} onChange={v => sim.setParam(p.key, v)} />
+            ))}
+          </div>
+
+          {/* Conservation audit */}
+          {snap.totalInjected > 0 && (() => {
+            // ── Conservation audit: account for every dollar ──
+            // Only real buckets: person balances, pool commons balances, meta commons balance, in flight
+            const poolNodeBals = snap.pools.map(p => Math.round(p.balances.reduce((a, b) => a + b, 0)));
+            const poolCommonsBals = snap.pools.map(p => Math.round(p.commonsBalance));
+            const metaComm = Math.round(snap.metaCommonsBalance);
+            const inFlight = Math.round(snap.pendingTotal);
+            const tracked = poolNodeBals.reduce((s,v)=>s+v,0) + poolCommonsBals.reduce((s,v)=>s+v,0) + metaComm + inFlight;
+            const leaked = Math.round(snap.totalInjected) - tracked;
+
+            return (
+              <div style={{ marginTop: 10, fontSize: 9, color: "#334155", lineHeight: 2 }}>
+                <div>Injected: <strong style={{ color: "#fcd34d" }}>${Math.round(snap.totalInjected).toLocaleString()}</strong></div>
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 4 }}>
+                  {POOL_DEFS.map((p, i) => (
+                    <div key={i} style={{ fontSize: 8 }}>
+                      <span style={{ color: p.color }}>{p.short}:</span>{" "}
+                      <span style={{ color: "#94a3b8" }}>nodes ${poolNodeBals[i].toLocaleString()}</span>{" "}
+                      <span style={{ color: TRAFFIC.flowing }}>commons ${poolCommonsBals[i].toLocaleString()}</span>
+                    </div>
+                  ))}
+                  {metaComm > 0 && <div style={{ fontSize: 8 }}><span style={{ color: "#c084fc" }}>meta commons ${metaComm.toLocaleString()}</span></div>}
+                  {inFlight > 0 && <div style={{ fontSize: 8 }}><span style={{ color: "#38bdf8" }}>in flight ${inFlight.toLocaleString()}</span></div>}
+                </div>
+                <div style={{ marginTop: 2 }}>
+                  Accounted: <strong style={{ color: leaked !== 0 ? TRAFFIC.deficit : TRAFFIC.atMax }}>${tracked.toLocaleString()}</strong>
+                  {leaked !== 0 && <span style={{ color: TRAFFIC.deficit, fontWeight: 700 }}> ⚠ DISCREPANCY: ${leaked.toLocaleString()}</span>}
+                  {leaked === 0 && <span style={{ color: TRAFFIC.atMax }}> ✓</span>}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+
+        {/* ── Body — identical at every level ── */}
+        <div style={{ flex: 1, padding: "14px 18px", overflowY: "auto" }}>
+          {sel === "commons" && <CommonsPanel view={view} setSel={setSel} />}
+          {typeof sel === "number" && <NodePanel nodeId={sel} view={view} snap={snap} setSel={setSel} onDrill={canDrill ? zoomIn : null} />}
+
+          {sel === null && snap.totalInjected === 0 && (
+            <div style={{ padding: "12px 14px", ...S.panel, fontSize: 10, color: "#334155", lineHeight: 1.9, marginBottom: 14, animation: "fadein 0.5s ease" }}>
+              {view.nodeCount} holons orbit a shared commons pool.<br />
+              Same rules at every level: purpose, thresholds, surplus flows outward.<br /><br />
+              <span style={{ color: "#64748b" }}>Click a node to select.</span>{" "}
+              <span style={{ color: "#64748b" }}>Click again to {canDrill ? "zoom in" : "inject capital"}.</span><br />
+              <span style={{ color: TRAFFIC.atMax }}>▶ DEMO</span> auto-injects to demonstrate cascade.
+            </div>
+          )}
+
+          {sel === null && <FlowLog log={log} />}
+          {sel === null && <NodeList view={view} setSel={setSel} />}
+
+          {/* Flow log always accessible at bottom */}
+          {sel !== null && log.length > 0 && <FlowLog log={log} />}
+        </div>
+      </div>
+
+      {/* ═══ LOG OVERLAY ═══ */}
+      {showLog && (
+        <div style={{ position: "fixed", inset: 0, background: "rgba(5,9,26,0.92)", zIndex: 999, display: "flex", flexDirection: "column", padding: 24 }}
+          onClick={(e) => { if (e.target === e.currentTarget) setShowLog(false); }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "#fcd34d", letterSpacing: "0.08em" }}>FLOW LOG — {log.length} entries</div>
+            <button onClick={() => setShowLog(false)}
+              style={{ background: "#0d1f40", border: "1px solid #fcd34d60", borderRadius: 4, color: "#fcd34d", fontSize: 12, fontWeight: 700, fontFamily: "inherit", cursor: "pointer", padding: "6px 16px" }}>
+              ✕ CLOSE
+            </button>
+          </div>
+          <textarea readOnly value={log.join("\n")}
+            onClick={e => e.target.select()}
+            style={{ flex: 1, width: "100%", boxSizing: "border-box", background: "#03060f", border: "1px solid #1e3554", borderRadius: 6, color: "#e2e8f0", fontSize: 11, fontFamily: "'IBM Plex Mono', monospace", padding: 16, resize: "none", outline: "none", lineHeight: 1.8 }} />
+          <div style={{ marginTop: 8, fontSize: 10, color: "#475569" }}>Click the text to select all, then Cmd+C / Ctrl+C to copy.</div>
+        </div>
+      )}
+    </div>
+  );
+}
