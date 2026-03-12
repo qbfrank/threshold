@@ -381,10 +381,10 @@ function makeInitThresholds() {
   return {
     pools: POOL_TOPOS.map(topo => ({
       nodes: topo.nodes.map(n => ({ min: n.min, max: n.max })),
-      commons: { min: 5000, max: 25000 },
+      commons: { min: 5000, max: 10000 },
     })),
     meta: {
-      commons: { min: 5000, max: 50000 },
+      commons: { min: 5000, max: 10000 },
     },
   };
 }
@@ -1714,10 +1714,10 @@ const FlowLog = memo(function FlowLog({ log }) {
 function ParamSlider({ label, hint, value, min, max, step, format, onChange }) {
   const pct = ((value - min) / (max - min)) * 100;
   return (
-    <div style={{ marginBottom: 10 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
-        <span style={{ fontSize: 10, color: "#c4a97a", letterSpacing: "0.08em" }}>{label}</span>
-        <span style={{ fontSize: 9, fontWeight: 700, color: "#fcd34d", fontFamily: "monospace" }}>{format(value)}</span>
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 4 }}>
+        <span style={{ fontSize: 10, color: "#c4a97a", letterSpacing: "0.08em", whiteSpace: "nowrap" }}>{label}</span>
+        <span style={{ fontSize: 11, fontWeight: 700, color: "#fcd34d", fontFamily: "monospace", whiteSpace: "nowrap", marginLeft: 8 }}>{format(value)}</span>
       </div>
       <div style={{ position: "relative", height: 18 }}>
         <div style={{ position: "absolute", top: 7, left: 0, right: 0, height: 4, borderRadius: 2, background: "#3d2b14" }} />
@@ -1726,7 +1726,7 @@ function ParamSlider({ label, hint, value, min, max, step, format, onChange }) {
           aria-label={label}
           style={{ position: "absolute", top: 0, left: 0, width: "100%", height: 18, opacity: 0, cursor: "pointer", margin: 0 }} />
       </div>
-      <div style={{ fontSize: 10, color: "#6b4d2e", marginTop: 2 }}>{hint}</div>
+      <div style={{ fontSize: 9, color: "#6b4d2e", marginTop: 3, fontStyle: "italic" }}>{hint}</div>
     </div>
   );
 }
@@ -2044,8 +2044,8 @@ const CSS = `
 `;
 
 const PARAM_DEFS = [
-  { key: "outflowRate", label: "Outflow Rate", min: 0, max: 1.0, step: 0.01, fmt: v => `${Math.round(v * 100)}%`, hint: "% of surplus above min that resources outward" },
-  { key: "peerSplit", label: "Commoners / Commons", min: 0, max: 1.0, step: 0.01, fmt: v => `${Math.round(v * 100)}% commoners · ${Math.round((1 - v) * 100)}% commons`, hint: "How outflow divides between commoners and the commons" },
+  { key: "outflowRate", label: "Outflow Rate", min: 0, max: 1.0, step: 0.01, fmt: v => `${Math.round(v * 100)}%`, hint: "% of surplus above min that flows outward" },
+  { key: "peerSplit", label: "Peer / Commons Split", min: 0, max: 1.0, step: 0.01, fmt: v => `${Math.round(v * 100)}/${Math.round((1 - v) * 100)}`, hint: "Outflow split: commoners vs commons" },
   { key: "fieldRate", label: "Field Dispersal", min: 0.01, max: 1.0, step: 0.01, fmt: v => `${Math.round(v * 100)}%`, hint: "% of commons surplus dispersed to the field" },
 ];
 
