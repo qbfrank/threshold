@@ -8,7 +8,8 @@ const CFG = {
   poolSize: 9,
   clustersPerPool: 3,
   nodesPerCluster: 3,
-  poolCount: 3,
+  poolCount: 10,
+  metaCount: 3,
   timing: { travelMs: 1000 },
   // Canvas: concentric orbits — commons at center, nodes orbit, then outer context
   canvas: { W: 700, H: 700 },
@@ -30,9 +31,16 @@ const CFG = {
 const W = CFG.canvas.W, H = CFG.canvas.H;
 const CX = W / 2, CY = H / 2;
 
+const META_DEFS = [
+  { id: 0, label: "What's Possible", short: "WP", pools: [0, 1, 2], color: "#c9854e" },
+  { id: 1, label: "Come and Play", short: "CP", pools: [3, 4, 5], color: "#b05080" },
+  { id: 2, label: "Happy Be-Earth Day", short: "BD", pools: [6, 7, 8, 9], color: "#4a9060" },
+];
+
 const POOL_DEFS = [
+  // ── Meta 0: What's Possible ──
   {
-    id: 0, label: "The Good", short: "GOOD",
+    id: 0, label: "The Good", short: "GOOD", meta: 0,
     clusters: [
       { name: "Mycelium",    color: "#d4913a" },
       { name: "Canopy",      color: "#a3823a" },
@@ -42,7 +50,7 @@ const POOL_DEFS = [
     color: "#d4913a",
   },
   {
-    id: 1, label: "The True", short: "TRUE",
+    id: 1, label: "The True", short: "TRUE", meta: 0,
     clusters: [
       { name: "Tidal", color: "#b87333" },
       { name: "Coral", color: "#8b5e3c" },
@@ -52,7 +60,7 @@ const POOL_DEFS = [
     color: "#b87333",
   },
   {
-    id: 2, label: "The Beautiful", short: "BEAUTIFUL",
+    id: 2, label: "The Beautiful", short: "BEAUTIFUL", meta: 0,
     clusters: [
       { name: "Ridge",     color: "#946b3c" },
       { name: "Meadow",    color: "#7a8b4e" },
@@ -61,7 +69,81 @@ const POOL_DEFS = [
     names: ["Ash","Brook","Cedar","Dune","Elm","Flint","Glen","Heath","Ivy"],
     color: "#946b3c",
   },
+  // ── Meta 1: Come and Play ──
+  {
+    id: 3, label: "Heart", short: "HEART", meta: 1,
+    clusters: [
+      { name: "Pulse",   color: "#c94050" },
+      { name: "Embrace", color: "#a83545" },
+      { name: "Rhythm",  color: "#d45a6a" },
+    ],
+    names: ["Love","Joy","Grace","Hope","Bliss","Valor","Mercy","Peace","Faith"],
+    color: "#c94050",
+  },
+  {
+    id: 4, label: "Mind", short: "MIND", meta: 1,
+    clusters: [
+      { name: "Spark", color: "#4a8bc2" },
+      { name: "Depth", color: "#3a6ea0" },
+      { name: "Prism", color: "#5ea0d4" },
+    ],
+    names: ["Logic","Muse","Sage","Nova","Zen","Atlas","Luna","Bolt","Lyric"],
+    color: "#4a8bc2",
+  },
+  {
+    id: 5, label: "Soul", short: "SOUL", meta: 1,
+    clusters: [
+      { name: "Flame", color: "#8b5ebf" },
+      { name: "Still", color: "#6a45a0" },
+      { name: "Dream", color: "#a070d4" },
+    ],
+    names: ["Spirit","Shadow","Light","Void","Aura","Storm","Calm","Dawn","Dusk"],
+    color: "#8b5ebf",
+  },
+  // ── Meta 2: Happy Be-Earth Day ──
+  {
+    id: 6, label: "Earth", short: "EARTH", meta: 2,
+    clusters: [
+      { name: "Stone", color: "#6b8e3a" },
+      { name: "Loam",  color: "#4a6e2a" },
+      { name: "Seed",  color: "#8aae4a" },
+    ],
+    names: ["Clay","Granite","Moss","Pebble","Dust","Ore","Fossil","Amber","Jade"],
+    color: "#6b8e3a",
+  },
+  {
+    id: 7, label: "Wind", short: "WIND", meta: 2,
+    clusters: [
+      { name: "Gust",   color: "#7babc4" },
+      { name: "Breeze", color: "#5a8aa4" },
+      { name: "Drift",  color: "#90c0d8" },
+    ],
+    names: ["Gale","Whisper","Cyclone","Zephyr","Squall","Sigh","Tempest","Flutter","Haze"],
+    color: "#7babc4",
+  },
+  {
+    id: 8, label: "Fire", short: "FIRE", meta: 2,
+    clusters: [
+      { name: "Blaze", color: "#d45a2a" },
+      { name: "Glow",  color: "#b04520" },
+      { name: "Forge", color: "#e87040" },
+    ],
+    names: ["Flare","Ash","Cinder","Inferno","Smolder","Torch","Corona","Coal","Soot"],
+    color: "#d45a2a",
+  },
+  {
+    id: 9, label: "Water", short: "WATER", meta: 2,
+    clusters: [
+      { name: "Torrent", color: "#3a7e8b" },
+      { name: "Dew",     color: "#2a6070" },
+      { name: "Current", color: "#4a98a8" },
+    ],
+    names: ["Wave","Mist","Tide","Drop","Surge","Ripple","Stream","Frost","Rain"],
+    color: "#3a7e8b",
+  },
 ];
+
+function metaGroupOf(poolIdx) { return POOL_DEFS[poolIdx].meta; }
 
 const YOU = { poolIdx: 0, nodeIdx: 0 };
 
@@ -86,11 +168,15 @@ const LAYER_COLORS = ["#fcd34d", "#d4913a", "#b87333", "#946b3c"];
 //
 //   Pool commons receives R:
 //     fieldRate%    → satellite nodes   (via routeByActivation)
-//     overflow      → siblings + meta   (commonsRate : fieldRate split)
+//     overflow      → siblings + parent meta   (commonsRate : fieldRate split)
 //
 //   Meta commons receives R:
 //     fieldRate%    → pool commons      (via routeByActivation)
-//     (no higher level)
+//     overflow      → sibling metas + field commons   (commonsRate : fieldRate split)
+//
+//   Field commons receives R:
+//     fieldRate%    → meta commons      (via routeByActivation)
+//     overflow      → fill metas (top level, no parent)
 //
 
 // Derive effective rates from the two-slider model
@@ -215,45 +301,31 @@ function routeByActivation(amount, recipientIds, getDeficit, getHeadroom) {
   let remaining = amount;
   const allocs = new Map();
 
-  // Phase 1: Activate below-minimum nodes (cheapest first, capped at headroom)
+  // Phase 1: Activate below-minimum nodes (cheapest first, only full activations)
+  // Only fill a deficit when remaining is sufficient to fully activate the node.
+  // When no node can be fully activated, capital falls through to Phase 2 equalization.
   for (const { id, deficit, headroom } of candidates) {
     if (remaining < 1) break;
     if (deficit <= 0) continue;
-    const give = Math.min(remaining, deficit, headroom);
+    if (remaining < deficit) continue; // can't fully activate — equalize instead
+    const give = Math.min(deficit, headroom);
     if (give >= 1) {
       allocs.set(id, (allocs.get(id) || 0) + give);
       remaining -= give;
     }
   }
 
-  // Phase 2: Split among nodes with remaining headroom
-  const withRoom = candidates.filter(c => {
+  // Phase 2: Concentrate on cheapest-to-activate first (fill one before next)
+  // Candidates already sorted by deficit (cheapest first).
+  // Pour remaining into each node up to its headroom, one at a time.
+  for (const c of candidates) {
+    if (remaining < 1) break;
     const already = allocs.get(c.id) || 0;
-    return c.headroom - already > 0;
-  });
-
-  if (remaining >= 1 && withRoom.length > 0) {
-    const share = Math.floor(remaining / withRoom.length);
-    if (share >= 1) {
-      for (const c of withRoom) {
-        const already = allocs.get(c.id) || 0;
-        const give = Math.min(share, c.headroom - already);
-        if (give >= 1) {
-          allocs.set(c.id, already + give);
-          remaining -= give;
-        }
-      }
-    }
-    // Rounding residual to first with room
-    for (const c of withRoom) {
-      if (remaining < 1) break;
-      const already = allocs.get(c.id) || 0;
-      const room = c.headroom - already;
-      if (room >= 1) {
-        allocs.set(c.id, already + 1);
-        remaining -= 1;
-      }
-    }
+    const room = c.headroom - already;
+    if (room < 1) continue;
+    const give = Math.min(remaining, room);
+    allocs.set(c.id, already + give);
+    remaining -= give;
   }
 
   const result = [...allocs.entries()].filter(([, a]) => a >= 1).map(([id, a]) => ({ id, amount: a }));
@@ -363,14 +435,13 @@ function buildPoolTopology(poolDef, seed) {
   return { nodes, positions, flows, commonsFlows, clusters: poolDef.clusters };
 }
 
-const POOL_TOPOS = [
-  buildPoolTopology(POOL_DEFS[0], 0xdeadbeef),
-  buildPoolTopology(POOL_DEFS[1], 0xcafebabe),
-  buildPoolTopology(POOL_DEFS[2], 0xfeedface),
+const POOL_SEEDS = [
+  0xdeadbeef, 0xcafebabe, 0xfeedface,          // meta 0
+  0xbadf00d1, 0xc0ffee42, 0xbeefcafe,          // meta 1
+  0xf00dcafe, 0xbaddcafe, 0xdeadc0de, 0xfacefeed, // meta 2
 ];
+const POOL_TOPOS = POOL_DEFS.map((def, i) => buildPoolTopology(def, POOL_SEEDS[i]));
 
-// Meta-level positions: 2 pool nodes on a ring around center
-const META_POS = [0, 1, 2].map(i => polarXY(i, 3, CX, CY, CFG.orbits.nodeR));
 const COMMONS_POS = { x: CX, y: CY };
 
 // ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -378,15 +449,20 @@ const COMMONS_POS = { x: CX, y: CY };
 // ╚══════════════════════════════════════════════════════════════════════════════╝
 
 function makeInitThresholds() {
-  return {
-    pools: POOL_TOPOS.map(topo => ({
-      nodes: topo.nodes.map(n => ({ min: n.min, max: n.max })),
-      commons: { min: 5000, max: 10000 },
-    })),
-    meta: {
-      commons: { min: 5000, max: 10000 },
-    },
-  };
+  // Commons are pass-through distributors: min = 0 (no hoarding).
+  // Max = 1× average child max (buffer before overflow to siblings/parent).
+  const pools = POOL_TOPOS.map(topo => {
+    const nodes = topo.nodes.map(n => ({ min: n.min, max: n.max }));
+    const avgMax = Math.round(nodes.reduce((s, n) => s + n.max, 0) / nodes.length);
+    return { nodes, commons: { min: 0, max: avgMax } };
+  });
+  const metas = Array.from({ length: CFG.metaCount }, (_, mi) => {
+    const childPools = META_DEFS[mi].pools;
+    const avgMax = Math.round(childPools.reduce((s, pi) => s + pools[pi].commons.max, 0) / childPools.length);
+    return { commons: { min: 0, max: avgMax } };
+  });
+  const fieldMax = Math.round(metas.reduce((s, m) => s + m.commons.max, 0) / metas.length);
+  return { pools, metas, field: { commons: { min: 0, max: fieldMax } } };
 }
 
 // ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -403,8 +479,12 @@ function makeSimState() {
       commonsBalance: 0,
       commonsBanked: 0,
     })),
-    metaCommonsBalance: 0,
-    metaCommonsBanked: 0,
+    metaCommons: Array.from({ length: CFG.metaCount }, () => ({
+      balance: 0,
+      banked: 0,
+    })),
+    fieldCommonsBalance: 0,
+    fieldCommonsBanked: 0,
     epochDay: 0,
     epochCount: 0,
     pending: [],
@@ -417,15 +497,28 @@ function useSimulation() {
   const simRef = useRef(makeSimState());
   const paramsRef = useRef({ ...CFG.defaults });
   const threshRef = useRef(makeInitThresholds());
+  const depthRef = useRef("field"); // "node" | "pool" | "meta" | "field" — simulation boundary
   const commonsFlowsRef = useRef(POOL_TOPOS.map(t => [...t.commonsFlows]));
-  const metaFlowsRef = useRef([[1, 2], [0, 2], [0, 1]]);  // holonic: each pool peers with other 2
-  const metaCommonsFlowsRef = useRef([0, 1, 2]);          // Meta commons → all 3 pools
+  // Per-pool sibling peering (within same meta group)
+  const metaFlowsRef = useRef(
+    POOL_DEFS.map(p => META_DEFS[p.meta].pools.filter(idx => idx !== p.id))
+  );
+  // Per-meta commons → child pool flows
+  const metaCommonsFlowsRef = useRef(META_DEFS.map(m => [...m.pools]));
+  // Meta-meta peering (field level)
+  const fieldFlowsRef = useRef([[1, 2], [0, 2], [0, 1]]);
+  // Field commons → all meta commons
+  const fieldCommonsFlowsRef = useRef([0, 1, 2]);
 
   const [params, _setP] = useState({ ...CFG.defaults });
   const [thresholds, _setT] = useState(makeInitThresholds);
   const [commonsFlows, _setCF] = useState(POOL_TOPOS.map(t => [...t.commonsFlows]));
-  const [metaFlows, _setMF] = useState([[1, 2], [0, 2], [0, 1]]);
-  const [metaCommonsFlows, _setMCF] = useState([0, 1, 2]);
+  const [metaFlows, _setMF] = useState(
+    POOL_DEFS.map(p => META_DEFS[p.meta].pools.filter(idx => idx !== p.id))
+  );
+  const [metaCommonsFlows, _setMCF] = useState(META_DEFS.map(m => [...m.pools]));
+  const [fieldFlows, _setFF] = useState([[1, 2], [0, 2], [0, 1]]);
+  const [fieldCommonsFlows, _setFCF] = useState([0, 1, 2]);
   const [log, setLog] = useState([]);
   const [commonsRipples, setCommonsRipples] = useState([]);
   const ripIdRef = useRef(0);
@@ -437,8 +530,9 @@ function useSimulation() {
       commonsBalance: 0,
       commonsBanked: 0,
     })),
-    metaCommonsBalance: 0,
-    metaCommonsBanked: 0,
+    metaCommons: Array.from({ length: CFG.metaCount }, () => ({ balance: 0, banked: 0 })),
+    fieldCommonsBalance: 0,
+    fieldCommonsBanked: 0,
     epochDay: 0,
     epochCount: 0,
     flights: [],
@@ -476,10 +570,24 @@ function useSimulation() {
     _setMF(mf.map(a => [...a]));
   }, []);
 
-  const setMetaCommonsFlow = useCallback((slot, poolIdx) => {
-    const mcf = metaCommonsFlowsRef.current.map((v, i) => i === slot ? poolIdx : v);
+  const setMetaCommonsFlow = useCallback((metaIdx, slot, poolIdx) => {
+    const mcf = metaCommonsFlowsRef.current.map((a, i) =>
+      i === metaIdx ? a.map((v, j) => j === slot ? poolIdx : v) : [...a]
+    );
     metaCommonsFlowsRef.current = mcf;
-    _setMCF([...mcf]);
+    _setMCF(mcf.map(a => [...a]));
+  }, []);
+
+  const setFieldFlow = useCallback((metaIdx, slot, targetMetaIdx) => {
+    const ff = fieldFlowsRef.current.map((a, i) => i === metaIdx ? a.map((v, j) => j === slot ? targetMetaIdx : v) : [...a]);
+    fieldFlowsRef.current = ff;
+    _setFF(ff.map(a => [...a]));
+  }, []);
+
+  const setFieldCommonsFlow = useCallback((slot, metaIdx) => {
+    const fcf = fieldCommonsFlowsRef.current.map((v, i) => i === slot ? metaIdx : v);
+    fieldCommonsFlowsRef.current = fcf;
+    _setFCF([...fcf]);
   }, []);
 
   const appendLog = useCallback((entries) => {
@@ -506,92 +614,206 @@ function useSimulation() {
     simRef.current.flights.push({ id: _fid++, from, to, startMs: ts, amount, level });
   }, []);
 
-  // Process meta-commons on receipt — distributes to pool commons (activation priority)
-  const processMetaCommons = useCallback((received, ts) => {
+  // Process field-commons on receipt — pass-through distributor to meta commons
+  // Commons are routing infrastructure: 100% of received cascades to children.
+  // fromMetaIdx: if provided, exclude this meta from distribution (prevents sender bounce)
+  const processFieldCommons = useCallback((received, ts, fromMetaIdx = -1) => {
     const sim = simRef.current;
-    const { fieldRate } = paramsRef.current;
-    const th = threshRef.current.meta.commons;
-    const prevBal = sim.metaCommonsBalance - received;
-    const { toField, overflow, aboveMin, newBalance } = FlowMath.onReceipt(prevBal, received, th.min, th.max, fieldRate, 0);
-    sim.metaCommonsBalance = newBalance;
-    const retained = Math.round(received - toField);
-    if (toField < CFG.minFlight) {
-      sim.metaCommonsBalance += toField; // retain sub-threshold amount
-      appendLog([`  ◎ META COMMONS +${fmtL(received)} | bal ${fmtL(prevBal)}→${fmtL(sim.metaCommonsBalance)} [min ${fmtL(th.min)} max ${fmtL(th.max)}] ${getState(sim.metaCommonsBalance, th.min, th.max).toUpperCase()} — retained 100%`]);
-      return;
-    }
-    // Distribute to pool commons, closest-to-activation first
-    const allPoolIds = Array.from({ length: CFG.poolCount }, (_, i) => i);
-    // See through pool commons to the nodes inside — route to pools with internal need
-    const getDeficit = pIdx => {
-      const cDef = Math.max(0, threshRef.current.pools[pIdx].commons.min - sim.pools[pIdx].commonsBalance);
-      const nDef = threshRef.current.pools[pIdx].nodes.reduce((s, th, j) => s + Math.max(0, th.min - sim.pools[pIdx].balances[j]), 0);
-      return cDef + nDef;
+    const th = threshRef.current.field.commons;
+    const prevBal = sim.fieldCommonsBalance - received;
+    const L = [];
+    L.push(`  ★ FIELD COMMONS +${fmtL(received)} | bal ${fmtL(prevBal)}→${fmtL(sim.fieldCommonsBalance)} [max ${fmtL(th.max)}]`);
+
+    const allMetaIds = fromMetaIdx >= 0
+      ? Array.from({ length: CFG.metaCount }, (_, i) => i).filter(i => i !== fromMetaIdx)
+      : Array.from({ length: CFG.metaCount }, (_, i) => i);
+    // Deficit = cheapest node activation in meta subtree (concentrate on most activatable path)
+    const getDeficit = mIdx => {
+      let cheapest = Infinity;
+      for (const pIdx of META_DEFS[mIdx].pools) {
+        for (let j = 0; j < CFG.poolSize; j++) {
+          const d = Math.max(0, threshRef.current.pools[pIdx].nodes[j].min - sim.pools[pIdx].balances[j]);
+          if (d > 0 && d < cheapest) cheapest = d;
+        }
+      }
+      return cheapest === Infinity ? 0 : cheapest;
     };
-    const getRoom = pIdx => {
-      const cRoom = Math.max(0, threshRef.current.pools[pIdx].commons.max - sim.pools[pIdx].commonsBalance);
-      const nRoom = threshRef.current.pools[pIdx].nodes.reduce((s, th, j) => s + Math.max(0, th.max - sim.pools[pIdx].balances[j]), 0);
-      return cRoom + nRoom;
-    };
-    const { allocs } = routeByActivation(toField, allPoolIds, getDeficit, getRoom);
-    let actuallyRouted = 0;
-    for (const { id: pIdx, amount } of allocs) {
-      if (amount >= CFG.minFlight) { schedFlight("mc", `p${pIdx}`, ts, amount, "meta"); actuallyRouted += amount; }
+    const getRoom = mIdx => META_DEFS[mIdx].pools.reduce((s, pIdx) =>
+      s + threshRef.current.pools[pIdx].nodes.reduce((s2, nth, j) =>
+        s2 + Math.max(0, nth.max - sim.pools[pIdx].balances[j]), 0), 0);
+
+    // Step 1: Route ALL received to meta commons (activation priority)
+    const toRoute = Math.floor(received);
+    if (toRoute >= CFG.minFlight) {
+      const { allocs } = routeByActivation(toRoute, allMetaIds, getDeficit, getRoom);
+      let distributed = 0;
+      for (const { id, amount } of allocs) {
+        if (amount >= CFG.minFlight) { schedFlight("fc", `mc${id}`, ts, amount, "field"); distributed += amount; }
+      }
+      sim.fieldCommonsBalance -= distributed;
+      const routed = allocs.filter(a => a.amount >= CFG.minFlight);
+      if (routed.length) L.push(`    → metas: ${routed.map(a => `${META_DEFS[a.id].short} COMMONS ${fmtL(a.amount)}`).join(", ")}`);
     }
-    // Conservation: return unrouted capital to meta commons
-    const unrouted = toField - actuallyRouted;
-    if (unrouted > 0) sim.metaCommonsBalance += unrouted;
-    const routed = allocs.filter(a => a.amount >= CFG.minFlight);
-    const routeDetail = routed.length
-      ? routed.map(a => `${POOL_DEFS[a.id].short} COMMONS ${fmtL(a.amount)} (deficit ${fmtL(getDeficit(a.id))})`).join(", ")
-      : "none (all pools full)";
-    appendLog([
-      `  ◎ META COMMONS +${fmtL(received)} | bal ${fmtL(prevBal)}→${fmtL(sim.metaCommonsBalance)} [min ${fmtL(th.min)} max ${fmtL(th.max)}] ${getState(sim.metaCommonsBalance, th.min, th.max).toUpperCase()}`,
-      `    field ${Math.round(fieldRate * 100)}% of above-min ${fmtL(aboveMin)} = ${fmtL(toField)}${overflow > 0 ? ` (includes overflow ${fmtL(overflow)})` : ""} → ${routeDetail}`,
-    ]);
+
+    // Step 2: overflow (accumulated balance > max) → fill meta commons
+    const overflow = Math.max(0, sim.fieldCommonsBalance - th.max);
+    if (overflow < 1) { appendLog(L); return; }
+    L.push(`    overflow ${fmtL(overflow)} (bal ${fmtL(sim.fieldCommonsBalance)} > max ${fmtL(th.max)})`);
+
+    let surplus = Math.floor(overflow);
+    if (surplus >= CFG.minFlight) {
+      const { allocs } = routeByActivation(surplus, allMetaIds, getDeficit, getRoom);
+      let distributed = 0;
+      for (const { id, amount } of allocs) {
+        if (amount >= CFG.minFlight) { schedFlight("fc", `mc${id}`, ts, amount, "field"); distributed += amount; }
+      }
+      sim.fieldCommonsBalance -= distributed;
+      const routed = allocs.filter(a => a.amount >= CFG.minFlight);
+      if (routed.length) L.push(`    overflow → metas: ${routed.map(a => `${META_DEFS[a.id].short} COMMONS ${fmtL(a.amount)}`).join(", ")}`);
+    }
+    appendLog(L);
   }, [schedFlight, appendLog]);
 
-  // Process pool commons on receipt.
-  // Delta-only: routes only the RECEIVED amount through the rate-first model.
-  //
-  //   Below min  → retained. Commons is accumulating.
-  //   Above min  → fieldRate% flows DOWN to nearest-to-activation satellite.
-  //   Overflow   → IF balance still exceeds max AFTER field rate applied:
-  //                FIRST fill ALL satellites to their min (nobody left behind).
-  //                THEN remainder flows to SIBLING pool commons (activation priority).
-  //                Whatever siblings can't absorb → meta commons.
-  //
+  // Process meta-commons on receipt — pass-through distributor to child pool commons
+  // 100% of received cascades to children. Overflow → siblings, then field.
+  // fromPoolIdx: if provided, exclude this pool from distribution (prevents sender bounce)
+  const processMetaCommons = useCallback((metaIdx, received, ts, fromPoolIdx = -1) => {
+    const sim = simRef.current;
+    const { fieldRate, commonsRate } = deriveRates(paramsRef.current);
+    const th = threshRef.current.metas[metaIdx].commons;
+    const metaDef = META_DEFS[metaIdx];
+    const prevBal = sim.metaCommons[metaIdx].balance - received;
+    const L = [];
+    L.push(`  ◎ ${metaDef.short} COMMONS +${fmtL(received)} | bal ${fmtL(prevBal)}→${fmtL(sim.metaCommons[metaIdx].balance)} [max ${fmtL(th.max)}]`);
+
+    const childPoolIds = fromPoolIdx >= 0 ? metaDef.pools.filter(p => p !== fromPoolIdx) : metaDef.pools;
+    // Deficit = cheapest node activation in pool (concentrate on most activatable path)
+    const getDeficit = pIdx => {
+      let cheapest = Infinity;
+      for (let j = 0; j < CFG.poolSize; j++) {
+        const d = Math.max(0, threshRef.current.pools[pIdx].nodes[j].min - sim.pools[pIdx].balances[j]);
+        if (d > 0 && d < cheapest) cheapest = d;
+      }
+      return cheapest === Infinity ? 0 : cheapest;
+    };
+    const getRoom = pIdx => threshRef.current.pools[pIdx].nodes.reduce((s, nth, j) =>
+      s + Math.max(0, nth.max - sim.pools[pIdx].balances[j]), 0);
+
+    // Step 1: Route ALL received to child pool commons (activation priority)
+    const toRoute = Math.floor(received);
+    if (toRoute >= CFG.minFlight) {
+      const { allocs } = routeByActivation(toRoute, childPoolIds, getDeficit, getRoom);
+      let distributed = 0;
+      for (const { id: pIdx, amount } of allocs) {
+        if (amount >= CFG.minFlight) { schedFlight(`mc${metaIdx}`, `p${pIdx}`, ts, amount, `meta${metaIdx}`); distributed += amount; }
+      }
+      sim.metaCommons[metaIdx].balance -= distributed;
+      const routed = allocs.filter(a => a.amount >= CFG.minFlight);
+      if (routed.length) L.push(`    → pools: ${routed.map(a => `${POOL_DEFS[a.id].short} COMMONS ${fmtL(a.amount)}`).join(", ")}`);
+    }
+
+    // Step 2: overflow (accumulated balance > max) → children, then siblings, then field
+    const overflow = Math.max(0, sim.metaCommons[metaIdx].balance - th.max);
+    if (overflow < 1) { appendLog(L); return; }
+
+    L.push(`    overflow ${fmtL(overflow)} (bal ${fmtL(sim.metaCommons[metaIdx].balance)} > max ${fmtL(th.max)})`);
+    let surplus = Math.floor(overflow);
+
+    // Step 2a: try children again (handles accumulated balance)
+    if (surplus >= CFG.minFlight) {
+      const { allocs } = routeByActivation(surplus, childPoolIds, getDeficit, getRoom);
+      let distributed = 0;
+      for (const { id: pIdx, amount } of allocs) {
+        if (amount >= CFG.minFlight) { schedFlight(`mc${metaIdx}`, `p${pIdx}`, ts, amount, `meta${metaIdx}`); distributed += amount; }
+      }
+      sim.metaCommons[metaIdx].balance -= distributed;
+      surplus -= distributed;
+      const routed = allocs.filter(a => a.amount >= CFG.minFlight);
+      if (routed.length) L.push(`    overflow → pools: ${routed.map(a => `${POOL_DEFS[a.id].short} COMMONS ${fmtL(a.amount)}`).join(", ")}`);
+    }
+
+    if (surplus < CFG.minFlight) { appendLog(L); return; }
+
+    // Boundary check: at "meta" depth, no sibling meta or field routing
+    const depth = depthRef.current;
+    if (depth === "meta" || depth === "pool" || depth === "node") {
+      L.push(`    surplus ${fmtL(surplus)} retained at meta boundary`);
+      appendLog(L);
+      return;
+    }
+
+    // Step 2b: sibling metas + field commons
+    const siblingMetaIds = META_DEFS.map((_, i) => i).filter(i => i !== metaIdx);
+    const commonsToField = commonsRate > 0 ? Math.round(surplus * commonsRate / (commonsRate + fieldRate)) : 0;
+    const toSiblings = surplus - commonsToField;
+
+    if (toSiblings >= CFG.minFlight && siblingMetaIds.length > 0) {
+      const getSibDeficit = mIdx => {
+        let cheapest = Infinity;
+        for (const pIdx of META_DEFS[mIdx].pools) {
+          for (let j = 0; j < CFG.poolSize; j++) {
+            const d = Math.max(0, threshRef.current.pools[pIdx].nodes[j].min - sim.pools[pIdx].balances[j]);
+            if (d > 0 && d < cheapest) cheapest = d;
+          }
+        }
+        return cheapest === Infinity ? 0 : cheapest;
+      };
+      const getSibRoom = mIdx => META_DEFS[mIdx].pools.reduce((s, pIdx) =>
+        s + threshRef.current.pools[pIdx].nodes.reduce((s2, nth, j) =>
+          s2 + Math.max(0, nth.max - sim.pools[pIdx].balances[j]), 0), 0);
+      const { allocs, unroutable } = routeByActivation(toSiblings, siblingMetaIds, getSibDeficit, getSibRoom);
+      let distributed = 0;
+      for (const { id: tgt, amount } of allocs) {
+        if (amount >= CFG.minFlight) { schedFlight(`mc${metaIdx}`, `mc${tgt}`, ts, amount, "field"); distributed += amount; }
+      }
+      sim.metaCommons[metaIdx].balance -= distributed;
+      if (distributed >= CFG.minFlight) {
+        L.push(`    overflow → sibling metas: ${allocs.filter(a => a.amount >= CFG.minFlight).map(a => `${META_DEFS[a.id].short} COMMONS ${fmtL(a.amount)}`).join(", ")}`);
+      }
+      const extraToField = Math.floor(unroutable);
+      if (extraToField >= CFG.minFlight) {
+        sim.metaCommons[metaIdx].balance -= extraToField;
+        sim.fieldCommonsBalance += extraToField;
+        schedVisual(`mc${metaIdx}`, "fc", ts, extraToField, "field");
+        L.push(`    overflow → field commons ${fmtL(extraToField)} (siblings full)`);
+        appendLog(L); L.length = 0;
+        processFieldCommons(extraToField, ts, metaIdx);
+      }
+    }
+
+    if (commonsToField >= CFG.minFlight) {
+      sim.metaCommons[metaIdx].balance -= commonsToField;
+      sim.fieldCommonsBalance += commonsToField;
+      schedVisual(`mc${metaIdx}`, "fc", ts, commonsToField, "field");
+      L.push(`    resourced ${fmtL(commonsToField)} → Field Commons`);
+      appendLog(L); L.length = 0;
+      processFieldCommons(commonsToField, ts, metaIdx);
+    }
+
+    if (L.length) appendLog(L);
+  }, [schedFlight, schedVisual, appendLog, processFieldCommons]);
+
+  // Process pool commons on receipt — pass-through distributor to satellite nodes.
+  // 100% of received cascades to children. Overflow → siblings, then parent meta.
   const processPoolCommons = useCallback((poolIdx, received, ts) => {
     const sim = simRef.current;
     const pool = sim.pools[poolIdx];
     const { fieldRate, commonsRate } = deriveRates(paramsRef.current);
     const th = threshRef.current.pools[poolIdx].commons;
     const pLabel = POOL_DEFS[poolIdx].short;
-
     const prevBal = pool.commonsBalance - received;
-    const newTotal = pool.commonsBalance;
-
-    if (newTotal <= th.min) {
-      appendLog([`  ⬇ ${pLabel} COMMONS +${fmtL(received)} | bal ${fmtL(prevBal)}→${fmtL(newTotal)} [min ${fmtL(th.min)} max ${fmtL(th.max)}] UNENGAGED — retained 100%`]);
-      return;
-    }
+    const L = [];
+    L.push(`  ⬇ ${pLabel} COMMONS +${fmtL(received)} | bal ${fmtL(prevBal)}→${fmtL(pool.commonsBalance)} [max ${fmtL(th.max)}]`);
 
     const nodeTh = threshRef.current.pools[poolIdx].nodes;
     const allNodeIds = Array.from({ length: CFG.poolSize }, (_, i) => i);
     const getDeficit = id => Math.max(0, nodeTh[id].min - pool.balances[id]);
     const getRoom = id => Math.max(0, nodeTh[id].max - pool.balances[id]);
 
-    // Step 1: How much of the received capital is above min
-    const aboveMin = Math.max(0, newTotal - Math.max(prevBal, th.min));
-
-    // Collect log lines, flush before any processMetaCommons call
-    const L = [];
-    L.push(`  ⬇ ${pLabel} COMMONS +${fmtL(received)} | bal ${fmtL(prevBal)}→${fmtL(newTotal)} [min ${fmtL(th.min)} max ${fmtL(th.max)}] ${getState(newTotal, th.min, th.max).toUpperCase()}`);
-
-    // Step 2: Apply fieldRate to ALL capital above min → distribute to satellites
-    const fieldFlow = Math.round(aboveMin * fieldRate);
-    if (fieldFlow >= CFG.minFlight) {
-      const { allocs } = routeByActivation(fieldFlow, allNodeIds, getDeficit, getRoom);
+    // Step 1: Route ALL received to satellite nodes (activation priority)
+    const toRoute = Math.floor(received);
+    if (toRoute >= CFG.minFlight) {
+      const { allocs } = routeByActivation(toRoute, allNodeIds, getDeficit, getRoom);
       let distributed = 0;
       for (const { id, amount } of allocs) {
         if (amount >= CFG.minFlight) {
@@ -601,21 +823,17 @@ function useSimulation() {
       }
       pool.commonsBalance -= distributed;
       const routed = allocs.filter(a => a.amount >= CFG.minFlight);
-      if (routed.length) L.push(`    field ${Math.round(fieldRate * 100)}% of above-min ${fmtL(Math.round(aboveMin))} = ${fmtL(fieldFlow)} → ${routed.map(a => `${POOL_TOPOS[poolIdx].nodes[a.id].name} ${fmtL(a.amount)}`).join(", ")}`);
+      if (routed.length) L.push(`    → nodes: ${routed.map(a => `${POOL_TOPOS[poolIdx].nodes[a.id].name} ${fmtL(a.amount)}`).join(", ")}`);
     }
 
-    // Step 3: Check if balance still exceeds max AFTER field rate applied
+    // Step 2: overflow (accumulated balance > max) → children, then siblings, then parent
     const overflow = Math.max(0, pool.commonsBalance - th.max);
-    if (overflow < 1) {
-      L.push(`    post-flow bal ${fmtL(pool.commonsBalance)} — no overflow`);
-      appendLog(L);
-      return;
-    }
+    if (overflow < 1) { appendLog(L); return; }
 
-    L.push(`    post-flow overflow ${fmtL(overflow)} (bal ${fmtL(pool.commonsBalance)} > max ${fmtL(th.max)})`)
+    L.push(`    overflow ${fmtL(overflow)} (bal ${fmtL(pool.commonsBalance)} > max ${fmtL(th.max)})`);
     let surplus = Math.floor(overflow);
 
-    // Step 1: Distribute overflow to ALL satellites with room (deficits first, then equalize)
+    // Step 2a: try children again (handles accumulated balance)
     if (surplus >= CFG.minFlight) {
       const { allocs } = routeByActivation(surplus, allNodeIds, getDeficit, getRoom);
       let distributed = 0;
@@ -628,53 +846,70 @@ function useSimulation() {
       pool.commonsBalance -= distributed;
       surplus -= distributed;
       const routed = allocs.filter(a => a.amount >= CFG.minFlight);
-      if (routed.length) L.push(`    overflow → satellites ${fmtL(distributed)}: ${routed.map(a => `${POOL_TOPOS[poolIdx].nodes[a.id].name} ${fmtL(a.amount)} (bal ${fmtL(pool.balances[a.id])} room ${fmtL(getRoom(a.id))})`).join(", ")}`);
+      if (routed.length) L.push(`    overflow → nodes: ${routed.map(a => `${POOL_TOPOS[poolIdx].nodes[a.id].name} ${fmtL(a.amount)}`).join(", ")}`);
     }
 
     if (surplus < CFG.minFlight) { appendLog(L); return; }
 
-    // Step 2: Sibling pool commons (activation priority, commonsRate% tax to meta)
-    const siblingIds = POOL_DEFS.filter(p => p.id !== poolIdx).map(p => p.id);
+    // Boundary check: at "pool" depth, no sibling or meta routing
+    const depth = depthRef.current;
+    if (depth === "pool" || depth === "node") {
+      L.push(`    surplus ${fmtL(surplus)} retained at pool boundary`);
+      appendLog(L);
+      return;
+    }
+
+    // Step 2b: Sibling pool commons + parent meta
+    const myMeta = metaGroupOf(poolIdx);
+    const siblingIds = META_DEFS[myMeta].pools.filter(p => p !== poolIdx);
     const commonsToMeta = commonsRate > 0 ? Math.round(surplus * commonsRate / (commonsRate + fieldRate)) : 0;
     const toSiblings = surplus - commonsToMeta;
 
     if (toSiblings >= CFG.minFlight && siblingIds.length > 0) {
-      const getSibDeficit = pIdx => Math.max(0, threshRef.current.pools[pIdx].commons.min - sim.pools[pIdx].commonsBalance);
-      const getSibRoom = pIdx => Math.max(0, threshRef.current.pools[pIdx].commons.max - sim.pools[pIdx].commonsBalance);
+      const getSibDeficit = pIdx => {
+        let cheapest = Infinity;
+        for (let j = 0; j < CFG.poolSize; j++) {
+          const d = Math.max(0, threshRef.current.pools[pIdx].nodes[j].min - sim.pools[pIdx].balances[j]);
+          if (d > 0 && d < cheapest) cheapest = d;
+        }
+        return cheapest === Infinity ? 0 : cheapest;
+      };
+      const getSibRoom = pIdx => threshRef.current.pools[pIdx].nodes.reduce((s, nth, j) =>
+        s + Math.max(0, nth.max - sim.pools[pIdx].balances[j]), 0);
       const { allocs, unroutable } = routeByActivation(toSiblings, siblingIds, getSibDeficit, getSibRoom);
       let distributed = 0;
       for (const { id: tgt, amount } of allocs) {
         if (amount >= CFG.minFlight) {
-          schedFlight(`c${poolIdx}`, `p${tgt}`, ts, amount, "meta");
+          schedFlight(`c${poolIdx}`, `p${tgt}`, ts, amount, `meta${myMeta}`);
           distributed += amount;
         }
       }
       pool.commonsBalance -= distributed;
       if (distributed >= CFG.minFlight) {
-        L.push(`    overflow → siblings ${fmtL(distributed)}: ${allocs.filter(a => a.amount >= CFG.minFlight).map(a => `${POOL_DEFS[a.id].short} COMMONS ${fmtL(a.amount)} (deficit ${fmtL(getSibDeficit(a.id))})`).join(", ")}`);
+        L.push(`    overflow → siblings: ${allocs.filter(a => a.amount >= CFG.minFlight).map(a => `${POOL_DEFS[a.id].short} COMMONS ${fmtL(a.amount)}`).join(", ")}`);
       }
-      // Unroutable (siblings full) → also goes to meta commons
-      const extraToMeta = Math.floor(unroutable);
-      if (extraToMeta >= CFG.minFlight) {
-        pool.commonsBalance -= extraToMeta;
-        sim.metaCommonsBalance += extraToMeta;
-        schedVisual(`c${poolIdx}`, "mc", ts, extraToMeta, "meta");
-        L.push(`    overflow → meta commons ${fmtL(extraToMeta)} (siblings full)`);
-        // Flush log BEFORE processMetaCommons (which adds its own log entries)
-        appendLog(L); L.length = 0;
-        processMetaCommons(extraToMeta, ts);
+      if (depth === "meta") {
+        if (unroutable >= 1) L.push(`    unroutable ${fmtL(unroutable)} retained at meta boundary`);
+      } else {
+        const extraToMeta = Math.floor(unroutable);
+        if (extraToMeta >= CFG.minFlight) {
+          pool.commonsBalance -= extraToMeta;
+          sim.metaCommons[myMeta].balance += extraToMeta;
+          schedVisual(`c${poolIdx}`, `mc${myMeta}`, ts, extraToMeta, `meta${myMeta}`);
+          L.push(`    overflow → ${META_DEFS[myMeta].short} commons ${fmtL(extraToMeta)} (siblings full)`);
+          appendLog(L); L.length = 0;
+          processMetaCommons(myMeta, extraToMeta, ts, poolIdx);
+        }
       }
     }
 
-    // Step 3: Commons tax → meta commons
-    if (commonsToMeta >= CFG.minFlight) {
+    if (depth !== "meta" && commonsToMeta >= CFG.minFlight) {
       pool.commonsBalance -= commonsToMeta;
-      sim.metaCommonsBalance += commonsToMeta;
-      schedVisual(`c${poolIdx}`, "mc", ts, commonsToMeta, "meta");
-      L.push(`    resourced ${fmtL(commonsToMeta)} → Meta Commons`);
-      // Flush log BEFORE processMetaCommons
+      sim.metaCommons[myMeta].balance += commonsToMeta;
+      schedVisual(`c${poolIdx}`, `mc${myMeta}`, ts, commonsToMeta, `meta${myMeta}`);
+      L.push(`    resourced ${fmtL(commonsToMeta)} → ${META_DEFS[myMeta].short} Commons`);
       appendLog(L); L.length = 0;
-      processMetaCommons(commonsToMeta, ts);
+      processMetaCommons(myMeta, commonsToMeta, ts, poolIdx);
     }
 
     if (L.length) appendLog(L);
@@ -684,8 +919,9 @@ function useSimulation() {
   const settleEpoch = useCallback(() => {
     const sim = simRef.current;
     const ts = Date.now();
+    const depth = depthRef.current;
     const logLines = [];
-    logLines.push(`━━━ EPOCH ${sim.epochCount + 1} SETTLEMENT ━━━`);
+    logLines.push(`━━━ EPOCH ${sim.epochCount + 1} SETTLEMENT (boundary: ${depth}) ━━━`);
 
     // Phase 1: Person nodes — bank or return
     for (let p = 0; p < sim.pools.length; p++) {
@@ -701,11 +937,14 @@ function useSimulation() {
         if (bal >= nodeTh[i].min) {
           pool.banked[i] += bal;
           logLines.push(`  ✓ BANKED ${name} (${pLabel}) ${fmtL(bal)}`);
+        } else if (depth === "node") {
+          // At node boundary, failed capital carries over (no commons to return to)
+          logLines.push(`  ★ ${name} (${pLabel}) ${fmtL(bal)} carries over (node boundary)`);
         } else {
           returnToCommons += bal;
           logLines.push(`  ✗ RETURNED ${name} (${pLabel}) ${fmtL(bal)} → commons`);
         }
-        pool.balances[i] = 0;
+        if (depth !== "node" || bal >= nodeTh[i].min) pool.balances[i] = 0;
       }
 
       if (returnToCommons > 0) {
@@ -714,39 +953,78 @@ function useSimulation() {
       }
     }
 
-    // Phase 2: Pool commons — bank or return
-    let returnToMeta = 0;
-    for (let p = 0; p < sim.pools.length; p++) {
-      const pool = sim.pools[p];
-      const pLabel = POOL_DEFS[p].short;
-      const bal = pool.commonsBalance;
-      if (bal < 1) { pool.commonsBalance = 0; continue; }
-      const cTh = threshRef.current.pools[p].commons;
-      if (bal >= cTh.min) {
-        pool.commonsBanked += bal;
-        logLines.push(`  ✓ BANKED ${pLabel} COMMONS ${fmtL(bal)}`);
-      } else {
-        returnToMeta += bal;
-        logLines.push(`  ✗ RETURNED ${pLabel} COMMONS ${fmtL(bal)} → meta`);
+    // Phase 2: Pool commons — bank or return to parent meta (skip at "node" depth)
+    if (depth !== "node") {
+      const returnToMeta = new Float64Array(CFG.metaCount);
+      for (let p = 0; p < sim.pools.length; p++) {
+        const pool = sim.pools[p];
+        const pLabel = POOL_DEFS[p].short;
+        const bal = pool.commonsBalance;
+        if (bal < 1) { pool.commonsBalance = 0; continue; }
+        const cTh = threshRef.current.pools[p].commons;
+        if (bal >= cTh.min) {
+          pool.commonsBanked += bal;
+          logLines.push(`  ✓ BANKED ${pLabel} COMMONS ${fmtL(bal)}`);
+        } else if (depth === "pool") {
+          // At pool boundary, failed pool commons carries over
+          logLines.push(`  ★ ${pLabel} COMMONS ${fmtL(bal)} carries over (pool boundary)`);
+          continue; // don't zero out
+        } else {
+          returnToMeta[metaGroupOf(p)] += bal;
+          logLines.push(`  ✗ RETURNED ${pLabel} COMMONS ${fmtL(bal)} → ${META_DEFS[metaGroupOf(p)].short}`);
+        }
+        pool.commonsBalance = 0;
       }
-      pool.commonsBalance = 0;
+
+      if (depth !== "pool") {
+        for (let m = 0; m < CFG.metaCount; m++) {
+          if (returnToMeta[m] > 0) {
+            sim.metaCommons[m].balance += returnToMeta[m];
+            logLines.push(`  ↩ ${META_DEFS[m].short} COMMONS received ${fmtL(returnToMeta[m])} from failed pool commons`);
+          }
+        }
+      }
     }
 
-    if (returnToMeta > 0) {
-      sim.metaCommonsBalance += returnToMeta;
-      logLines.push(`  ↩ META COMMONS received ${fmtL(returnToMeta)} from failed pool commons`);
+    // Phase 3: Meta commons — bank or return to field (skip at "node"/"pool" depth)
+    if (depth === "meta" || depth === "field") {
+      let returnToField = 0;
+      for (let m = 0; m < CFG.metaCount; m++) {
+        const metaBal = sim.metaCommons[m].balance;
+        if (metaBal < 1) { sim.metaCommons[m].balance = 0; continue; }
+        const metaTh = threshRef.current.metas[m].commons;
+        if (metaBal >= metaTh.min) {
+          sim.metaCommons[m].banked += metaBal;
+          sim.metaCommons[m].balance = 0;
+          logLines.push(`  ✓ BANKED ${META_DEFS[m].short} COMMONS ${fmtL(metaBal)}`);
+        } else if (depth === "meta") {
+          // At meta boundary, failed meta commons carries over
+          logLines.push(`  ★ ${META_DEFS[m].short} COMMONS ${fmtL(metaBal)} carries over (meta boundary)`);
+        } else {
+          returnToField += metaBal;
+          sim.metaCommons[m].balance = 0;
+          logLines.push(`  ✗ RETURNED ${META_DEFS[m].short} COMMONS ${fmtL(metaBal)} → Field`);
+        }
+      }
+
+      if (depth === "field" && returnToField > 0) {
+        sim.fieldCommonsBalance += returnToField;
+        logLines.push(`  ↩ FIELD COMMONS received ${fmtL(returnToField)} from failed meta commons`);
+      }
     }
 
-    // Phase 3: Meta commons — bank or carry
-    const metaBal = sim.metaCommonsBalance;
-    if (metaBal >= 1) {
-      const metaTh = threshRef.current.meta.commons;
-      if (metaBal >= metaTh.min) {
-        sim.metaCommonsBanked += metaBal;
-        sim.metaCommonsBalance = 0;
-        logLines.push(`  ✓ BANKED META COMMONS ${fmtL(metaBal)}`);
-      } else {
-        logLines.push(`  ◎ META COMMONS ${fmtL(metaBal)} carries over (below min)`);
+    // Phase 4: Field commons — bank or carry (only at "field" depth)
+    if (depth === "field") {
+      const fieldBal = sim.fieldCommonsBalance;
+      if (fieldBal >= 1) {
+        const fieldTh = threshRef.current.field.commons;
+        if (fieldBal >= fieldTh.min) {
+          sim.fieldCommonsBanked += fieldBal;
+          sim.fieldCommonsBalance = 0;
+          logLines.push(`  ✓ BANKED FIELD COMMONS ${fmtL(fieldBal)}`);
+        } else {
+          logLines.push(`  ★ FIELD COMMONS ${fmtL(fieldBal)} carries over (below min)`);
+        }
       }
     }
 
@@ -754,42 +1032,61 @@ function useSimulation() {
     sim.epochCount += 1;
     logLines.push(`━━━ EPOCH ${sim.epochCount} BEGINS ━━━`);
 
-    // Phase 4: Kickstart — flush banked commons back into active commons
-    // Banked commons seed the new epoch; normal flow mechanics distribute the surplus.
+    // Phase 5: Kickstart — flush banked commons back into active commons (respect boundary)
     let anyKickstart = false;
-    for (let p = 0; p < sim.pools.length; p++) {
-      const pool = sim.pools[p];
-      if (pool.commonsBanked < 1) continue;
-      const amt = pool.commonsBanked;
-      pool.commonsBalance += amt;
-      pool.commonsBanked = 0;
-      logLines.push(`  ⟳ KICKSTART ${POOL_DEFS[p].short} COMMONS ${fmtL(amt)} from bank`);
-      anyKickstart = true;
-    }
-    if (sim.metaCommonsBanked >= 1) {
-      const amt = sim.metaCommonsBanked;
-      sim.metaCommonsBalance += amt;
-      sim.metaCommonsBanked = 0;
-      logLines.push(`  ⟳ KICKSTART META COMMONS ${fmtL(amt)} from bank`);
-      anyKickstart = true;
-    }
-
-    // Flush settlement log before kickstart distribution (which adds its own entries)
-    appendLog(logLines);
-
-    // Distribute kickstarted funds through normal flow mechanics
-    if (anyKickstart) {
-      // Meta first (top-down: meta distributes to pools, then pools distribute to nodes)
-      if (sim.metaCommonsBalance >= 1) {
-        processMetaCommons(sim.metaCommonsBalance, ts);
-      }
+    if (depth !== "node") {
       for (let p = 0; p < sim.pools.length; p++) {
-        if (sim.pools[p].commonsBalance >= 1) {
-          processPoolCommons(p, sim.pools[p].commonsBalance, ts);
+        const pool = sim.pools[p];
+        if (pool.commonsBanked < 1) continue;
+        const amt = pool.commonsBanked;
+        pool.commonsBalance += amt;
+        pool.commonsBanked = 0;
+        logLines.push(`  ⟳ KICKSTART ${POOL_DEFS[p].short} COMMONS ${fmtL(amt)} from bank`);
+        anyKickstart = true;
+      }
+    }
+    if (depth === "meta" || depth === "field") {
+      for (let m = 0; m < CFG.metaCount; m++) {
+        if (sim.metaCommons[m].banked >= 1) {
+          const amt = sim.metaCommons[m].banked;
+          sim.metaCommons[m].balance += amt;
+          sim.metaCommons[m].banked = 0;
+          logLines.push(`  ⟳ KICKSTART ${META_DEFS[m].short} COMMONS ${fmtL(amt)} from bank`);
+          anyKickstart = true;
         }
       }
     }
-  }, [appendLog, processPoolCommons, processMetaCommons]);
+    if (depth === "field" && sim.fieldCommonsBanked >= 1) {
+      const amt = sim.fieldCommonsBanked;
+      sim.fieldCommonsBalance += amt;
+      sim.fieldCommonsBanked = 0;
+      logLines.push(`  ⟳ KICKSTART FIELD COMMONS ${fmtL(amt)} from bank`);
+      anyKickstart = true;
+    }
+
+    appendLog(logLines);
+
+    // Distribute kickstarted funds top-down (respect boundary)
+    if (anyKickstart) {
+      if (depth === "field" && sim.fieldCommonsBalance >= 1) {
+        processFieldCommons(sim.fieldCommonsBalance, ts);
+      }
+      if (depth === "meta" || depth === "field") {
+        for (let m = 0; m < CFG.metaCount; m++) {
+          if (sim.metaCommons[m].balance >= 1) {
+            processMetaCommons(m, sim.metaCommons[m].balance, ts);
+          }
+        }
+      }
+      if (depth !== "node") {
+        for (let p = 0; p < sim.pools.length; p++) {
+          if (sim.pools[p].commonsBalance >= 1) {
+            processPoolCommons(p, sim.pools[p].commonsBalance, ts);
+          }
+        }
+      }
+    }
+  }, [appendLog, processPoolCommons, processMetaCommons, processFieldCommons]);
 
   // Apply receipt to a person node within a pool (user injections only).
   // Commons tax always applies to user injections.
@@ -803,8 +1100,9 @@ function useSimulation() {
     const pLabel = POOL_DEFS[poolIdx].short;
 
     const prevBal = pool.balances[nodeIdx];
-    pool.balances[nodeIdx] += amt;
     let { toCommons, toField, overflow, aboveMin, newBalance } = FlowMath.onReceipt(prevBal, amt, th.min, th.max, symbiontRate, commonsRate);
+    // At "node" depth, all capital stays in node — no commons or peer flow
+    if (depthRef.current === "node") { toCommons = 0; toField = 0; newBalance = prevBal + amt; }
     // Suppress sub-threshold flows — capital stays in balance
     if (toCommons < CFG.minFlight) { newBalance += toCommons; toCommons = 0; }
     if (toField < CFG.minFlight) { newBalance += toField; toField = 0; }
@@ -863,26 +1161,29 @@ function useSimulation() {
   // ── Conservation snapshot for log ──────────────────────────────────────
   const snapBalance = useCallback(() => {
     const sim = simRef.current;
-    const labels = ["GOOD", "TRUE", "BEAUTIFUL"];
-    const poolParts = [];
+    const metaParts = [];
     let poolTotal = 0, bankedTotal = 0;
-    for (let i = 0; i < sim.pools.length; i++) {
-      const nodes = Math.round(sim.pools[i].balances.reduce((s,v)=>s+v,0));
-      const commons = Math.round(sim.pools[i].commonsBalance);
-      const nb = Math.round(sim.pools[i].banked.reduce((s,v)=>s+v,0));
-      const cb = Math.round(sim.pools[i].commonsBanked);
-      poolParts.push(`[${labels[i]}: nodes $${nodes} commons $${commons}${nb + cb > 0 ? ` banked $${nb + cb}` : ""}]`);
-      poolTotal += nodes + commons;
-      bankedTotal += nb + cb;
+    for (let m = 0; m < CFG.metaCount; m++) {
+      let mNodes = 0, mCommons = 0, mBanked = 0;
+      for (const pIdx of META_DEFS[m].pools) {
+        mNodes += Math.round(sim.pools[pIdx].balances.reduce((s,v)=>s+v,0));
+        mCommons += Math.round(sim.pools[pIdx].commonsBalance);
+        mBanked += Math.round(sim.pools[pIdx].banked.reduce((s,v)=>s+v,0)) + Math.round(sim.pools[pIdx].commonsBanked);
+      }
+      const mc = Math.round(sim.metaCommons[m].balance);
+      const mcb = Math.round(sim.metaCommons[m].banked);
+      metaParts.push(`[${META_DEFS[m].short}: $${mNodes + mCommons + mc}${mBanked + mcb > 0 ? ` bk$${mBanked + mcb}` : ""}]`);
+      poolTotal += mNodes + mCommons + mc;
+      bankedTotal += mBanked + mcb;
     }
-    const mc = Math.round(sim.metaCommonsBalance);
-    const mcb = Math.round(sim.metaCommonsBanked);
-    bankedTotal += mcb;
+    const fc = Math.round(sim.fieldCommonsBalance);
+    const fcb = Math.round(sim.fieldCommonsBanked);
+    bankedTotal += fcb;
     const fl = Math.round(sim.pending.reduce((s,p)=>s+p.amount,0));
-    const total = poolTotal + mc + fl + bankedTotal;
+    const total = poolTotal + fc + fl + bankedTotal;
     const inj = Math.round(sim.totalInjected);
     const gap = inj - total;
-    return `  ${poolParts.join(" ")} [META $${mc}${mcb > 0 ? ` banked $${mcb}` : ""}] [flight $${fl}]${bankedTotal > 0 ? ` [banked $${bankedTotal}]` : ""} = $${total}/${inj}${gap !== 0 ? ` ⚠GAP $${gap}` : ' ✓'}`;
+    return `  ${metaParts.join(" ")} [FC $${fc}${fcb > 0 ? ` bk$${fcb}` : ""}] [fl $${fl}]${bankedTotal > 0 ? ` [bk $${bankedTotal}]` : ""} = $${total}/${inj}${gap !== 0 ? ` ⚠GAP $${gap}` : ' ✓'}`;
   }, []);
 
   // ── Public actions ────────────────────────────────────────────────────────
@@ -923,20 +1224,35 @@ function useSimulation() {
     triggerRipple(`pool${poolIdx}`);
   }, [processPoolCommons, appendLog, triggerRipple, snapBalance]);
 
-  const injectMetaCommons = useCallback((amt = null) => {
+  const injectMetaCommons = useCallback((metaIdx, amt = null) => {
     amt = amt ?? paramsRef.current.injectAmt;
     const sim = simRef.current;
-    const th = threshRef.current.meta.commons;
-    const prevBal = sim.metaCommonsBalance;
-    sim.metaCommonsBalance += amt;
+    const th = threshRef.current.metas[metaIdx].commons;
+    const prevBal = sim.metaCommons[metaIdx].balance;
+    sim.metaCommons[metaIdx].balance += amt;
     sim.totalInjected += amt;
-    processMetaCommons(amt, Date.now());
+    processMetaCommons(metaIdx, amt, Date.now());
     appendLog([
-      `⚡ INJECT ${fmtL(amt)} → Meta Commons | pre-bal ${fmtL(prevBal)} [min ${fmtL(th.min)} max ${fmtL(th.max)}] ${getState(prevBal, th.min, th.max).toUpperCase()}`,
+      `⚡ INJECT ${fmtL(amt)} → ${META_DEFS[metaIdx].short} Commons | pre-bal ${fmtL(prevBal)} [min ${fmtL(th.min)} max ${fmtL(th.max)}] ${getState(prevBal, th.min, th.max).toUpperCase()}`,
       snapBalance(),
     ]);
-    triggerRipple("meta");
+    triggerRipple(`meta${metaIdx}`);
   }, [processMetaCommons, appendLog, triggerRipple, snapBalance]);
+
+  const injectFieldCommons = useCallback((amt = null) => {
+    amt = amt ?? paramsRef.current.injectAmt;
+    const sim = simRef.current;
+    const th = threshRef.current.field.commons;
+    const prevBal = sim.fieldCommonsBalance;
+    sim.fieldCommonsBalance += amt;
+    sim.totalInjected += amt;
+    processFieldCommons(amt, Date.now());
+    appendLog([
+      `⚡ INJECT ${fmtL(amt)} → Field Commons | pre-bal ${fmtL(prevBal)} [min ${fmtL(th.min)} max ${fmtL(th.max)}] ${getState(prevBal, th.min, th.max).toUpperCase()}`,
+      snapBalance(),
+    ]);
+    triggerRipple("field");
+  }, [processFieldCommons, appendLog, triggerRipple, snapBalance]);
 
   const fillNodeToMax = useCallback((poolIdx, nodeIdx) => {
     const bal = simRef.current.pools[poolIdx].balances[nodeIdx];
@@ -949,10 +1265,15 @@ function useSimulation() {
     injectPoolCommons(poolIdx, needed);
   }, [injectPoolCommons]);
 
-  const fillMetaCommonsToMax = useCallback(() => {
-    const needed = Math.max(0, threshRef.current.meta.commons.max - simRef.current.metaCommonsBalance + 1);
-    injectMetaCommons(needed);
+  const fillMetaCommonsToMax = useCallback((metaIdx) => {
+    const needed = Math.max(0, threshRef.current.metas[metaIdx].commons.max - simRef.current.metaCommons[metaIdx].balance + 1);
+    injectMetaCommons(metaIdx, needed);
   }, [injectMetaCommons]);
+
+  const fillFieldCommonsToMax = useCallback(() => {
+    const needed = Math.max(0, threshRef.current.field.commons.max - simRef.current.fieldCommonsBalance + 1);
+    injectFieldCommons(needed);
+  }, [injectFieldCommons]);
 
   const tickDay = useCallback(() => {
     const sim = simRef.current;
@@ -979,20 +1300,41 @@ function useSimulation() {
       for (const p of sim.pending) {
         if (p.deliverAt > ts) { still.push(p); continue; }
 
-        if (p.level === "meta") {
-          // Meta delivery: to a pool commons or meta commons
+        if (p.level === "field") {
+          // Field delivery: to a meta commons
+          if (typeof p.to === "string" && p.to.startsWith("mc")) {
+            const mIdx = parseInt(p.to.slice(2));
+            const prevBal = sim.metaCommons[mIdx].balance;
+            sim.metaCommons[mIdx].balance += p.amount;
+            const fromLabel = typeof p.from === "string" && p.from === "fc" ? "Field Commons" : typeof p.from === "string" && p.from.startsWith("mc") ? `${META_DEFS[parseInt(p.from.slice(2))].short} COMMONS` : String(p.from);
+            newLog.push(`⊕ DELIVER ${fmtL(p.amount)} → ${META_DEFS[mIdx].short} COMMONS from ${fromLabel} | bal ${fmtL(prevBal)}→${fmtL(sim.metaCommons[mIdx].balance)}`);
+            if (newLog.length) { appendLog(newLog.splice(0)); }
+            processMetaCommons(mIdx, p.amount, ts);
+          } else if (p.to === "fc") {
+            const prevBal = sim.fieldCommonsBalance;
+            sim.fieldCommonsBalance += p.amount;
+            newLog.push(`⊕ DELIVER ${fmtL(p.amount)} → Field Commons | bal ${fmtL(prevBal)}→${fmtL(sim.fieldCommonsBalance)}`);
+            if (newLog.length) { appendLog(newLog.splice(0)); }
+            processFieldCommons(p.amount, ts);
+          }
+        } else if (p.level.startsWith("meta")) {
+          // Meta-level delivery: to a pool commons or meta commons
           if (typeof p.to === "string" && p.to.startsWith("p")) {
-            const pIdx = parseInt(p.to[1]);
+            const pIdx = parseInt(p.to.slice(1));
             const prevBal = sim.pools[pIdx].commonsBalance;
             sim.pools[pIdx].commonsBalance += p.amount;
-            const fromLabel = typeof p.from === "string" && p.from === "mc" ? "Meta Commons" : typeof p.from === "string" && p.from.startsWith("c") ? `${POOL_DEFS[parseInt(p.from[1])].short} COMMONS` : String(p.from);
+            const fromLabel = typeof p.from === "string" && p.from.startsWith("mc") ? `${META_DEFS[parseInt(p.from.slice(2))].short} COMMONS` : typeof p.from === "string" && p.from.startsWith("c") ? `${POOL_DEFS[parseInt(p.from.slice(1))].short} COMMONS` : String(p.from);
             newLog.push(`⊕ DELIVER ${fmtL(p.amount)} → ${POOL_DEFS[pIdx].short} COMMONS from ${fromLabel} | bal ${fmtL(prevBal)}→${fmtL(sim.pools[pIdx].commonsBalance)}`);
+            if (newLog.length) { appendLog(newLog.splice(0)); }
             processPoolCommons(pIdx, p.amount, ts);
-          } else if (p.to === "mc") {
-            const prevBal = sim.metaCommonsBalance;
-            sim.metaCommonsBalance += p.amount;
-            newLog.push(`⊕ DELIVER ${fmtL(p.amount)} → Meta Commons | bal ${fmtL(prevBal)}→${fmtL(sim.metaCommonsBalance)}`);
-            processMetaCommons(p.amount, ts);
+          } else if (typeof p.to === "string" && p.to.startsWith("mc")) {
+            const mIdx = parseInt(p.to.slice(2));
+            const prevBal = sim.metaCommons[mIdx].balance;
+            sim.metaCommons[mIdx].balance += p.amount;
+            const fromLabel = typeof p.from === "string" && p.from.startsWith("mc") ? `${META_DEFS[parseInt(p.from.slice(2))].short} COMMONS` : String(p.from);
+            newLog.push(`⊕ DELIVER ${fmtL(p.amount)} → ${META_DEFS[mIdx].short} COMMONS from ${fromLabel} | bal ${fmtL(prevBal)}→${fmtL(sim.metaCommons[mIdx].balance)}`);
+            if (newLog.length) { appendLog(newLog.splice(0)); }
+            processMetaCommons(mIdx, p.amount, ts);
           }
         } else {
           // Pool-level delivery
@@ -1003,10 +1345,11 @@ function useSimulation() {
           const nodeName = POOL_TOPOS[pIdx].nodes[nodeIdx].name;
 
           const prevBal = pool.balances[nodeIdx];
-          pool.balances[nodeIdx] += p.amount;
           const th = threshRef.current.pools[pIdx].nodes[nodeIdx];
           // Nodes are ambivalent: same rates regardless of source
           let { toCommons, toField, overflow, newBalance } = FlowMath.onReceipt(prevBal, p.amount, th.min, th.max, symbiontRate, commonsRate);
+          // At "node" depth, all capital stays in node — no commons or peer flow
+          if (depthRef.current === "node") { toCommons = 0; toField = 0; newBalance = prevBal + p.amount; }
           if (toCommons < CFG.minFlight) { newBalance += toCommons; toCommons = 0; }
           if (toField < CFG.minFlight) { newBalance += toField; toField = 0; }
           pool.balances[nodeIdx] = newBalance;
@@ -1075,8 +1418,9 @@ function useSimulation() {
           commonsBalance: p.commonsBalance,
           commonsBanked: p.commonsBanked,
         })),
-        metaCommonsBalance: sim.metaCommonsBalance,
-        metaCommonsBanked: sim.metaCommonsBanked,
+        metaCommons: sim.metaCommons.map(mc => ({ balance: mc.balance, banked: mc.banked })),
+        fieldCommonsBalance: sim.fieldCommonsBalance,
+        fieldCommonsBanked: sim.fieldCommonsBanked,
         epochDay: sim.epochDay,
         epochCount: sim.epochCount,
         flights: [...sim.flights],
@@ -1089,39 +1433,68 @@ function useSimulation() {
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [processPoolCommons, processMetaCommons, appendLog]);
+  }, [processPoolCommons, processMetaCommons, processFieldCommons, appendLog]);
+
+  const setDepth = useCallback((d) => { depthRef.current = d; }, []);
 
   return {
-    snap, params, thresholds, commonsFlows, metaFlows, metaCommonsFlows, log, commonsRipples,
-    setParam, setThreshold, setPoolCommonsFlow, setMetaFlow, setMetaCommonsFlow,
-    injectNode, injectPoolCommons, injectMetaCommons,
-    fillNodeToMax, fillPoolCommonsToMax, fillMetaCommonsToMax,
-    reset, appendLog, triggerRipple, settleEpoch, tickDay,
+    snap, params, thresholds, commonsFlows, metaFlows, metaCommonsFlows, fieldFlows, fieldCommonsFlows, log, commonsRipples,
+    setParam, setThreshold, setPoolCommonsFlow, setMetaFlow, setMetaCommonsFlow, setFieldFlow, setFieldCommonsFlow,
+    injectNode, injectPoolCommons, injectMetaCommons, injectFieldCommons,
+    fillNodeToMax, fillPoolCommonsToMax, fillMetaCommonsToMax, fillFieldCommonsToMax,
+    reset, appendLog, triggerRipple, settleEpoch, tickDay, setDepth, depthRef,
   };
 }
 
+// ── Depth levels (simulation boundary) ──────────────────────────────────────
+// node → pool → meta → field (micro → macro)
+const DEPTH_LEVELS = [
+  { key: "node",  label: "NODE",  icon: "\u25CF" },
+  { key: "pool",  label: "POOL",  icon: "\u25CE" },
+  { key: "meta",  label: "META",  icon: "\u25C8" },
+  { key: "field", label: "FIELD", icon: "\u2B21" },
+];
+
 // ── Demo Hook ───────────────────────────────────────────────────────────────
-function useDemo(injectNode) {
+function useDemo(sim) {
   const [active, setActive] = useState(false);
   const ref = useRef(false);
+
   useEffect(() => {
     ref.current = active;
     if (!active) return;
     let timer, idx = 0;
-    const targets = [
-      [0, 0], [1, 0], [2, 0], [0, 4], [1, 4], [2, 4], [0, 2], [1, 2], [2, 2], [0, 7], [1, 7], [2, 7],
-    ];
+
     const tick = () => {
       if (!ref.current) return;
-      const [p, n] = targets[idx % targets.length];
-      injectNode(p, n, true);
+      const d = sim.depthRef.current;
+
+      if (d === "node") {
+        // Rotate through all pools, 2 nodes each
+        const targets = [];
+        for (let p = 0; p < CFG.poolCount; p++) targets.push([p, 0]);
+        for (let p = 0; p < CFG.poolCount; p++) targets.push([p, 4]);
+        const [p, n] = targets[idx % targets.length];
+        sim.injectNode(p, n, true);
+      } else if (d === "pool") {
+        sim.injectPoolCommons(idx % CFG.poolCount);
+        sim.tickDay();
+      } else if (d === "meta") {
+        sim.injectMetaCommons(idx % CFG.metaCount);
+        sim.tickDay();
+      } else {
+        sim.injectFieldCommons();
+        sim.tickDay();
+      }
+
       idx++;
       timer = setTimeout(tick, CFG.demo.intervalMs);
     };
     timer = setTimeout(tick, CFG.demo.startMs);
     return () => clearTimeout(timer);
-  }, [active, injectNode]);
-  return [active, setActive];
+  }, [active, sim]);
+
+  return { active, setActive };
 }
 
 // ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -1144,62 +1517,310 @@ function useActiveEdges(flights, ts, levelFilter) {
 }
 
 // ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 6b: RAMIFICATION VIEW — ALL FLOWS AT ONCE                         ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+function flightIdToGlobal(id, level) {
+  if (id === "fc") return "fc";
+  if (typeof id === "string" && id.startsWith("mc")) return id;
+  if (typeof id === "string" && (id.startsWith("c") || id.startsWith("p"))) return `c${id.slice(1)}`;
+  if (typeof id === "number") {
+    const poolIdx = parseInt(level.replace("pool", ""));
+    return `n${poolIdx}_${id}`;
+  }
+  return String(id);
+}
+
+function useAllActiveEdges(flights, ts) {
+  return useMemo(() => {
+    const maps = { field: new Map(), meta: new Map(), pool: new Map() };
+    for (const fl of flights) {
+      const cat = fl.level === "field" ? "field" : fl.level.startsWith("meta") ? "meta" : "pool";
+      const gFrom = flightIdToGlobal(fl.from, fl.level);
+      const gTo = flightIdToGlobal(fl.to, fl.level);
+      const key = `${gFrom}-${gTo}`;
+      const progress = Math.min(1, (ts - fl.startMs) / CFG.timing.travelMs);
+      if (!maps[cat].has(key) || maps[cat].get(key).progress < progress)
+        maps[cat].set(key, { from: gFrom, to: gTo, progress, amount: fl.amount, level: fl.level });
+    }
+    return { field: [...maps.field.values()], meta: [...maps.meta.values()], pool: [...maps.pool.values()] };
+  }, [flights, ts]);
+}
+
+const RAM_LAYOUT = (() => {
+  const map = new Map();
+  const GAP = 2;
+  const sectors = [
+    { metaIdx: 0, startDeg: 0, spanDeg: 120, pools: [0, 1, 2] },
+    { metaIdx: 1, startDeg: 120, spanDeg: 120, pools: [3, 4, 5] },
+    { metaIdx: 2, startDeg: 240, spanDeg: 120, pools: [6, 7, 8, 9] },
+  ];
+  map.set("fc", { x: CX, y: CY, r: 18, type: "field", color: "#fcd34d", label: "FIELD", poolIdx: -1, metaIdx: -1 });
+  for (const sec of sectors) {
+    const { metaIdx, startDeg, spanDeg, pools } = sec;
+    const metaDef = META_DEFS[metaIdx];
+    const mAngle = (startDeg + spanDeg / 2 - 90) * Math.PI / 180;
+    map.set(`mc${metaIdx}`, { x: CX + 65 * Math.cos(mAngle), y: CY + 65 * Math.sin(mAngle), r: 14, type: "meta", color: metaDef.color, label: metaDef.short, poolIdx: -1, metaIdx });
+    const poolSpan = (spanDeg - GAP * 2) / pools.length;
+    for (let pi = 0; pi < pools.length; pi++) {
+      const pIdx = pools[pi];
+      const pAngle = (startDeg + GAP + poolSpan * (pi + 0.5) - 90) * Math.PI / 180;
+      map.set(`c${pIdx}`, { x: CX + 150 * Math.cos(pAngle), y: CY + 150 * Math.sin(pAngle), r: 8, type: "pool", color: POOL_DEFS[pIdx].color, label: POOL_DEFS[pIdx].short.slice(0, 3), poolIdx: pIdx, metaIdx });
+      for (let ni = 0; ni < CFG.poolSize; ni++) {
+        const nAngle = (startDeg + GAP + poolSpan * pi + poolSpan * (ni + 0.5) / CFG.poolSize - 90) * Math.PI / 180;
+        map.set(`n${pIdx}_${ni}`, { x: CX + 270 * Math.cos(nAngle), y: CY + 270 * Math.sin(nAngle), r: 4, type: "commoner", color: POOL_DEFS[pIdx].color, label: POOL_TOPOS[pIdx].nodes[ni].name, poolIdx: pIdx, metaIdx });
+      }
+    }
+  }
+  return map;
+})();
+
+const RAM_ENTRIES = [...RAM_LAYOUT.entries()];
+
+// Own balance for each entity (not aggregated — all entities visible simultaneously)
+function ramNodeData(gid, snap, thresholds) {
+  if (gid === "fc") return { balance: snap.fieldCommonsBalance, banked: snap.fieldCommonsBanked, min: thresholds.field.commons.min, max: thresholds.field.commons.max };
+  if (gid.startsWith("mc")) { const mi = parseInt(gid.slice(2)); return { balance: snap.metaCommons[mi].balance, banked: snap.metaCommons[mi].banked, min: thresholds.metas[mi].commons.min, max: thresholds.metas[mi].commons.max }; }
+  if (gid.startsWith("c")) { const pi = parseInt(gid.slice(1)); return { balance: snap.pools[pi].commonsBalance, banked: snap.pools[pi].commonsBanked, min: thresholds.pools[pi].commons.min, max: thresholds.pools[pi].commons.max }; }
+  if (gid.startsWith("n")) { const [pStr, nStr] = gid.slice(1).split("_"); const pi = parseInt(pStr), ni = parseInt(nStr); return { balance: snap.pools[pi].balances[ni], banked: snap.pools[pi].banked[ni], min: thresholds.pools[pi].nodes[ni].min, max: thresholds.pools[pi].nodes[ni].max }; }
+  return { balance: 0, banked: 0, min: 0, max: 0 };
+}
+
+// Subtree aggregate for detail panel display
+function ramSubtreeTotal(gid, snap) {
+  if (gid === "fc") {
+    let bal = snap.fieldCommonsBalance, bk = snap.fieldCommonsBanked;
+    for (let mi = 0; mi < CFG.metaCount; mi++) { bal += snap.metaCommons[mi].balance; bk += snap.metaCommons[mi].banked; }
+    for (const p of snap.pools) { bal += p.commonsBalance + p.balances.reduce((a, b) => a + b, 0); bk += p.commonsBanked + p.banked.reduce((a, b) => a + b, 0); }
+    return { balance: bal, banked: bk };
+  }
+  if (gid.startsWith("mc")) {
+    const mi = parseInt(gid.slice(2));
+    let bal = snap.metaCommons[mi].balance, bk = snap.metaCommons[mi].banked;
+    for (const pIdx of META_DEFS[mi].pools) {
+      bal += snap.pools[pIdx].commonsBalance + snap.pools[pIdx].balances.reduce((a, b) => a + b, 0);
+      bk += snap.pools[pIdx].commonsBanked + snap.pools[pIdx].banked.reduce((a, b) => a + b, 0);
+    }
+    return { balance: bal, banked: bk };
+  }
+  if (gid.startsWith("c")) {
+    const pi = parseInt(gid.slice(1));
+    return { balance: snap.pools[pi].commonsBalance + snap.pools[pi].balances.reduce((a, b) => a + b, 0),
+             banked: snap.pools[pi].commonsBanked + snap.pools[pi].banked.reduce((a, b) => a + b, 0) };
+  }
+  return null; // commoners have no subtree
+}
+
+function ramInject(gid, sim) {
+  if (gid === "fc") { sim.injectFieldCommons(); return; }
+  if (gid.startsWith("mc")) { sim.injectMetaCommons(parseInt(gid.slice(2))); return; }
+  if (gid.startsWith("c")) { sim.injectPoolCommons(parseInt(gid.slice(1))); return; }
+  if (gid.startsWith("n")) { const [pStr, nStr] = gid.slice(1).split("_"); sim.injectNode(parseInt(pStr), parseInt(nStr)); return; }
+}
+
+function ramFill(gid, sim) {
+  if (gid === "fc") { sim.fillFieldCommonsToMax(); return; }
+  if (gid.startsWith("mc")) { sim.fillMetaCommonsToMax(parseInt(gid.slice(2))); return; }
+  if (gid.startsWith("c")) { sim.fillPoolCommonsToMax(parseInt(gid.slice(1))); return; }
+  if (gid.startsWith("n")) { const [pStr, nStr] = gid.slice(1).split("_"); sim.fillNodeToMax(parseInt(pStr), parseInt(nStr)); return; }
+}
+
+// avgChild always references leaf-node thresholds so multiplier sliders stay meaningful
+function commonsAvgChildTh(gid, thresholds) {
+  if (gid === "fc") {
+    let sumMin = 0, sumMax = 0, count = 0;
+    for (const pool of thresholds.pools) {
+      for (const n of pool.nodes) { sumMin += n.min; sumMax += n.max; count++; }
+    }
+    return { avgChildMin: Math.round(sumMin / count), avgChildMax: Math.round(sumMax / count) };
+  }
+  if (gid.startsWith("mc")) {
+    const cp = META_DEFS[parseInt(gid.slice(2))].pools;
+    let sumMin = 0, sumMax = 0, count = 0;
+    for (const pi of cp) {
+      for (const n of thresholds.pools[pi].nodes) { sumMin += n.min; sumMax += n.max; count++; }
+    }
+    return { avgChildMin: Math.round(sumMin / count), avgChildMax: Math.round(sumMax / count) };
+  }
+  if (gid.startsWith("c")) {
+    const ns = thresholds.pools[parseInt(gid.slice(1))].nodes;
+    return {
+      avgChildMin: Math.round(ns.reduce((s, n) => s + n.min, 0) / ns.length),
+      avgChildMax: Math.round(ns.reduce((s, n) => s + n.max, 0) / ns.length),
+    };
+  }
+  return null;
+}
+
+function ramSetThreshold(gid, sim, field, value) {
+  if (gid === "fc") sim.setThreshold(["field", "commons"], field, value);
+  else if (gid.startsWith("mc")) sim.setThreshold(["metas", parseInt(gid.slice(2)), "commons"], field, value);
+  else if (gid.startsWith("c")) sim.setThreshold(["pools", parseInt(gid.slice(1)), "commons"], field, value);
+  else if (gid.startsWith("n")) {
+    const [pStr, nStr] = gid.slice(1).split("_");
+    sim.setThreshold(["pools", parseInt(pStr), "nodes", parseInt(nStr)], field, value);
+  }
+}
+
+function ramEdgeColor(level) {
+  if (level === "field") return "#fcd34d";
+  if (level.startsWith("meta")) return META_DEFS[parseInt(level.slice(4))].color;
+  return POOL_DEFS[parseInt(level.replace("pool", ""))].color;
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
 // ║  SECTION 7: LEVEL VIEW NORMALIZER                                           ║
 // ║  Transforms pool-level or meta-level data into the same shape.              ║
 // ║  The canvas and panels never know which level they're rendering.             ║
 // ╚══════════════════════════════════════════════════════════════════════════════╝
 
-function buildLevelView(zoom, snap, thresholds, sim, commonsFlows, metaFlows, metaCommonsFlows, commonsRipples) {
+function buildLevelView(zoom, snap, thresholds, sim, commonsFlows, metaFlows, metaCommonsFlows, fieldFlows, fieldCommonsFlows, commonsRipples) {
 
-  // ── META LEVEL: pool commons are nodes ─────────────────────────────────
-  if (zoom === "meta") {
+  // ── FIELD LEVEL: meta commons are nodes ────────────────────────────────
+  if (zoom === "field") {
+    const metaMetaFlows = fieldFlows; // [[1,2],[0,2],[0,1]]
     return {
-      levelId: "meta",
-      nodeCount: CFG.poolCount,
-      flightLevel: "meta",
-      // At meta level, each "node" IS a pool commons — color reflects aggregate node health
-      nodes: POOL_DEFS.map((p, i) => {
-        const bals = snap.pools[i].balances;
-        const ths = thresholds.pools[i].nodes;
-        const anyDeficit = ths.some((th, j) => bals[j] < th.min);
-        const fullCount = ths.filter((th, j) => bals[j] >= th.max).length;
-        const healthColor = anyDeficit ? TRAFFIC.deficit : lerpHex(TRAFFIC.flowing, TRAFFIC.atMax, fullCount / ths.length);
-        const poolBanked = Math.round(snap.pools[i].banked.reduce((a, b) => a + b, 0)) + snap.pools[i].commonsBanked;
+      levelId: "field",
+      nodeCount: CFG.metaCount,
+      flightLevel: "field",
+      nodes: META_DEFS.map((m, mi) => {
+        // Aggregate health across all pools in this meta
+        let anyDeficit = false, fullCount = 0, totalNodes = 0;
+        let totalBal = snap.metaCommons[mi].balance, totalBanked = snap.metaCommons[mi].banked;
+        for (const pIdx of m.pools) {
+          const bals = snap.pools[pIdx].balances;
+          const ths = thresholds.pools[pIdx].nodes;
+          totalBal += snap.pools[pIdx].commonsBalance + bals.reduce((a, b) => a + b, 0);
+          totalBanked += Math.round(snap.pools[pIdx].banked.reduce((a, b) => a + b, 0)) + snap.pools[pIdx].commonsBanked;
+          for (let j = 0; j < ths.length; j++) {
+            totalNodes++;
+            if (bals[j] < ths[j].min) anyDeficit = true;
+            if (bals[j] >= ths[j].max) fullCount++;
+          }
+        }
+        const healthColor = anyDeficit ? TRAFFIC.deficit : lerpHex(TRAFFIC.flowing, TRAFFIC.atMax, fullCount / Math.max(totalNodes, 1));
         return {
-          id: i, name: p.label, shortName: p.short,
-          balance: snap.pools[i].commonsBalance + snap.pools[i].balances.reduce((a, b) => a + b, 0),
-          banked: poolBanked,
-          min: thresholds.pools[i].commons.min, max: thresholds.pools[i].commons.max,
-          cluster: i, flows: metaFlows[i], healthColor,
+          id: mi, name: m.label, shortName: m.short,
+          balance: totalBal, banked: totalBanked,
+          min: thresholds.metas[mi].commons.min, max: thresholds.metas[mi].commons.max,
+          cluster: mi, flows: metaMetaFlows[mi], healthColor,
         };
       }),
-      clusters: POOL_DEFS.map(p => ({ name: p.label, color: p.color })),
-      positions: POOL_DEFS.map((_, i) => polarXY(i, CFG.poolCount, CX, CY, CFG.orbits.nodeR)),
-      flowGraph: metaFlows,
+      clusters: META_DEFS.map(m => ({ name: m.label, color: m.color })),
+      positions: META_DEFS.map((_, i) => polarXY(i, CFG.metaCount, CX, CY, CFG.orbits.nodeR)),
+      flowGraph: metaMetaFlows,
       commons: {
-        balance: snap.metaCommonsBalance,
-        banked: snap.metaCommonsBanked,
-        min: thresholds.meta.commons.min, max: thresholds.meta.commons.max,
-        label1: "WHAT'S", label2: "POSSIBLE?", flows: metaCommonsFlows,
+        balance: snap.fieldCommonsBalance,
+        banked: snap.fieldCommonsBanked,
+        min: thresholds.field.commons.min, max: thresholds.field.commons.max,
+        label1: "FIELD", label2: "COMMONS", flows: fieldCommonsFlows,
+        avgChildMin: Math.round(thresholds.pools.reduce((s, p) => s + p.nodes.reduce((s2, n) => s2 + n.min, 0), 0) / (CFG.poolCount * CFG.poolSize)),
+        avgChildMax: Math.round(thresholds.pools.reduce((s, p) => s + p.nodes.reduce((s2, n) => s2 + n.max, 0), 0) / (CFG.poolCount * CFG.poolSize)),
       },
-      ripples: commonsRipples.filter(r => r.level === "meta"),
+      ripples: commonsRipples.filter(r => r.level === "field"),
       normalizeId: (id) => {
         if (typeof id === "string") {
-          if (id === "mc") return "commons";
-          if (id.startsWith("p")) return parseInt(id[1]);
+          if (id === "fc") return "commons";
+          if (id.startsWith("mc")) return parseInt(id.slice(2));
         }
         return id;
       },
       outer: null,
       actions: {
-        injectNode: (id) => sim.injectPoolCommons(id),
-        injectCommons: () => sim.injectMetaCommons(),
-        fillNode: (id) => sim.fillPoolCommonsToMax(id),
-        fillCommons: () => sim.fillMetaCommonsToMax(),
-        setNodeTh: (id, f, v) => sim.setThreshold(["pools", id, "commons"], f, v),
-        setCommonsTh: (f, v) => sim.setThreshold(["meta", "commons"], f, v),
-        setCommonsFlow: (slot, nId) => sim.setMetaCommonsFlow(slot, nId),
+        injectNode: (id) => sim.injectMetaCommons(id),
+        injectCommons: () => sim.injectFieldCommons(),
+        fillNode: (id) => sim.fillMetaCommonsToMax(id),
+        fillCommons: () => sim.fillFieldCommonsToMax(),
+        setNodeTh: (id, f, v) => sim.setThreshold(["metas", id, "commons"], f, v),
+        setCommonsTh: (f, v) => sim.setThreshold(["field", "commons"], f, v),
+        setCommonsFlow: (slot, nId) => sim.setFieldCommonsFlow(slot, nId),
       },
+    };
+  }
+
+  // ── META LEVEL: pool commons are nodes ─────────────────────────────────
+  if (typeof zoom === "string" && zoom.startsWith("meta")) {
+    const metaIdx = parseInt(zoom.slice(4));
+    const metaDef = META_DEFS[metaIdx];
+    const childPools = metaDef.pools;
+    const N = childPools.length;
+
+    // Local flow graph: each pool peers with other pools in this meta (using local indices)
+    const localFlowGraph = childPools.map((_, li) =>
+      childPools.map((_, lj) => lj).filter(lj => lj !== li)
+    );
+
+    return {
+      levelId: `meta${metaIdx}`,
+      nodeCount: N,
+      flightLevel: `meta${metaIdx}`,
+      nodes: childPools.map((pIdx, li) => {
+        const bals = snap.pools[pIdx].balances;
+        const ths = thresholds.pools[pIdx].nodes;
+        const anyDeficit = ths.some((th, j) => bals[j] < th.min);
+        const fullCount = ths.filter((th, j) => bals[j] >= th.max).length;
+        const healthColor = anyDeficit ? TRAFFIC.deficit : lerpHex(TRAFFIC.flowing, TRAFFIC.atMax, fullCount / ths.length);
+        const poolBanked = Math.round(snap.pools[pIdx].banked.reduce((a, b) => a + b, 0)) + snap.pools[pIdx].commonsBanked;
+        return {
+          id: li, name: POOL_DEFS[pIdx].label, shortName: POOL_DEFS[pIdx].short,
+          balance: snap.pools[pIdx].commonsBalance + snap.pools[pIdx].balances.reduce((a, b) => a + b, 0),
+          banked: poolBanked,
+          min: thresholds.pools[pIdx].commons.min, max: thresholds.pools[pIdx].commons.max,
+          cluster: li, flows: localFlowGraph[li], healthColor,
+          globalPoolIdx: pIdx,
+        };
+      }),
+      clusters: childPools.map(pIdx => ({ name: POOL_DEFS[pIdx].label, color: POOL_DEFS[pIdx].color })),
+      positions: childPools.map((_, li) => polarXY(li, N, CX, CY, CFG.orbits.nodeR)),
+      flowGraph: localFlowGraph,
+      commons: {
+        balance: snap.metaCommons[metaIdx].balance,
+        banked: snap.metaCommons[metaIdx].banked,
+        min: thresholds.metas[metaIdx].commons.min, max: thresholds.metas[metaIdx].commons.max,
+        label1: metaDef.short, label2: "COMMONS",
+        flows: metaCommonsFlows[metaIdx].map(gIdx => childPools.indexOf(gIdx)),
+        avgChildMin: Math.round(childPools.reduce((s, pi) => s + thresholds.pools[pi].nodes.reduce((s2, n) => s2 + n.min, 0), 0) / (childPools.length * CFG.poolSize)),
+        avgChildMax: Math.round(childPools.reduce((s, pi) => s + thresholds.pools[pi].nodes.reduce((s2, n) => s2 + n.max, 0), 0) / (childPools.length * CFG.poolSize)),
+      },
+      ripples: commonsRipples.filter(r => r.level === `meta${metaIdx}`),
+      normalizeId: (id) => {
+        if (typeof id === "string") {
+          if (id === `mc${metaIdx}`) return "commons";
+          if (id.startsWith("c")) { const gi = parseInt(id.slice(1)); return childPools.indexOf(gi); }
+          if (id.startsWith("p")) { const gi = parseInt(id.slice(1)); return childPools.indexOf(gi); }
+        }
+        return id;
+      },
+      // Outer context: sibling metas + field commons (periphery shows subtree aggregates)
+      outer: {
+        siblings: META_DEFS.filter((_, i) => i !== metaIdx).map(m => {
+          let bal = snap.metaCommons[m.id].balance;
+          for (const pIdx of m.pools) bal += snap.pools[pIdx].commonsBalance + snap.pools[pIdx].balances.reduce((a, b) => a + b, 0);
+          return { id: m.id, label: m.short, color: m.color, balance: bal, flightIds: [`mc${m.id}`] };
+        }),
+        parent: {
+          label: "FIELD",
+          balance: snap.fieldCommonsBalance + snap.metaCommons.reduce((s, mc) => s + mc.balance, 0)
+            + snap.pools.reduce((s, p) => s + p.commonsBalance + p.balances.reduce((a, b) => a + b, 0), 0),
+          th: thresholds.field.commons, color: "#fcd34d",
+          flightId: "fc",
+        },
+        thisCommonsFlightId: `mc${metaIdx}`,
+        siblingLabel: "FIELD NETWORK",
+        parentLabel: "FIELD COMMONS",
+        metaFlights: snap.flights.filter(f => f.level === "field"),
+      },
+      actions: {
+        injectNode: (localId) => sim.injectPoolCommons(childPools[localId]),
+        injectCommons: () => sim.injectMetaCommons(metaIdx),
+        fillNode: (localId) => sim.fillPoolCommonsToMax(childPools[localId]),
+        fillCommons: () => sim.fillMetaCommonsToMax(metaIdx),
+        setNodeTh: (localId, f, v) => sim.setThreshold(["pools", childPools[localId], "commons"], f, v),
+        setCommonsTh: (f, v) => sim.setThreshold(["metas", metaIdx, "commons"], f, v),
+        setCommonsFlow: (slot, localId) => sim.setMetaCommonsFlow(metaIdx, slot, childPools[localId]),
+      },
+      // Extra: for drill navigation, map local → global
+      localToGlobal: childPools,
     };
   }
 
@@ -1208,6 +1829,7 @@ function buildLevelView(zoom, snap, thresholds, sim, commonsFlows, metaFlows, me
   const topo = POOL_TOPOS[poolIdx];
   const poolSnap = snap.pools[poolIdx];
   const poolTh = thresholds.pools[poolIdx];
+  const myMeta = metaGroupOf(poolIdx);
 
   return {
     levelId: `pool${poolIdx}`,
@@ -1229,6 +1851,8 @@ function buildLevelView(zoom, snap, thresholds, sim, commonsFlows, metaFlows, me
       min: poolTh.commons.min, max: poolTh.commons.max,
       label1: POOL_DEFS[poolIdx].short, label2: "COMMONS",
       flows: commonsFlows[poolIdx],
+      avgChildMin: Math.round(poolTh.nodes.reduce((s, n) => s + n.min, 0) / poolTh.nodes.length),
+      avgChildMax: Math.round(poolTh.nodes.reduce((s, n) => s + n.max, 0) / poolTh.nodes.length),
     },
     ripples: commonsRipples.filter(r => r.level === `pool${poolIdx}`),
     normalizeId: (id) => {
@@ -1237,14 +1861,27 @@ function buildLevelView(zoom, snap, thresholds, sim, commonsFlows, metaFlows, me
       }
       return id;
     },
-    // Outer context: sibling pool commons + meta commons
+    // Outer context: sibling pools + parent meta (periphery shows subtree aggregates)
     outer: {
-      siblings: POOL_DEFS.filter(p => p.id !== poolIdx).map(p => ({
-        id: p.id, label: p.short, color: p.color,
-        balance: snap.pools[p.id].commonsBalance,
+      siblings: META_DEFS[myMeta].pools.filter(p => p !== poolIdx).map(p => ({
+        id: p, label: POOL_DEFS[p].short, color: POOL_DEFS[p].color,
+        balance: snap.pools[p].commonsBalance + snap.pools[p].balances.reduce((a, b) => a + b, 0),
+        flightIds: [`c${p}`, `p${p}`],
       })),
-      metaCommons: { balance: snap.metaCommonsBalance, th: thresholds.meta.commons },
-      metaFlights: snap.flights.filter(f => f.level === "meta"),
+      parent: {
+        label: META_DEFS[myMeta].short,
+        balance: (() => {
+          let bal = snap.metaCommons[myMeta].balance;
+          for (const pIdx of META_DEFS[myMeta].pools) bal += snap.pools[pIdx].commonsBalance + snap.pools[pIdx].balances.reduce((a, b) => a + b, 0);
+          return bal;
+        })(),
+        th: thresholds.metas[myMeta].commons, color: META_DEFS[myMeta].color,
+        flightId: `mc${myMeta}`,
+      },
+      thisCommonsFlightId: `c${poolIdx}`,
+      siblingLabel: META_DEFS[myMeta].label.toUpperCase(),
+      parentLabel: `${META_DEFS[myMeta].short} COMMONS`,
+      metaFlights: snap.flights.filter(f => f.level === `meta${myMeta}`),
     },
     actions: {
       injectNode: (id) => sim.injectNode(poolIdx, id),
@@ -1422,6 +2059,189 @@ function FlowParticles({ edges, posOf, nodeLayerMap, hasSel, color = "#92702a", 
 }
 
 // ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║  SECTION 8b: RAMIFICATION CANVAS                                            ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+function SectorArc({ startDeg, spanDeg, color, r1, r2 }) {
+  const s = (startDeg - 90) * Math.PI / 180;
+  const e = (startDeg + spanDeg - 90) * Math.PI / 180;
+  const large = spanDeg > 180 ? 1 : 0;
+  const d = [
+    `M${CX + r1 * Math.cos(s)},${CY + r1 * Math.sin(s)}`,
+    `L${CX + r2 * Math.cos(s)},${CY + r2 * Math.sin(s)}`,
+    `A${r2},${r2} 0 ${large},1 ${CX + r2 * Math.cos(e)},${CY + r2 * Math.sin(e)}`,
+    `L${CX + r1 * Math.cos(e)},${CY + r1 * Math.sin(e)}`,
+    `A${r1},${r1} 0 ${large},0 ${CX + r1 * Math.cos(s)},${CY + r1 * Math.sin(s)}`,
+  ].join(" ");
+  return <path d={d} fill={color} opacity={0.06} />;
+}
+
+const RamNode = memo(function RamNode({ layout, balance, min, max, selected, onClick }) {
+  const { x, y, r, type, color, label } = layout;
+  const fill = nodeColor(balance, min, max);
+  const isCommoner = type === "commoner";
+  const stroke = type === "field" ? "#fcd34d" : color;
+  const sw = type === "field" ? 3 : type === "meta" ? 2 : type === "pool" ? 1.5 : 1;
+  const sr = selected ? r * 1.3 : r;
+  return (
+    <g onClick={onClick} style={{ cursor: "pointer" }}>
+      {isCommoner && <circle cx={x} cy={y} r={10} fill="transparent" />}
+      {selected && <circle cx={x} cy={y} r={sr + 6} fill="none" stroke={fill} strokeWidth={2} opacity={0.6} filter="url(#nglow)" />}
+      <circle cx={x} cy={y} r={sr} fill={fill} opacity={selected ? 0.9 : 0.7} stroke={stroke} strokeWidth={sw} />
+      {!isCommoner && <text x={x} y={y} textAnchor="middle" dominantBaseline="central" fontSize={type === "field" ? 7 : type === "meta" ? 6.5 : 5.5} fontWeight={700} fill="#1a1008" style={{ pointerEvents: "none" }}>{label}</text>}
+      {!isCommoner && balance > 0 && <text x={x} y={y + sr + 9} textAnchor="middle" fontSize={type === "field" ? 8 : 7} fontWeight={700} fill={fill} opacity={0.8}>{fmtBal(balance)}</text>}
+    </g>
+  );
+});
+
+const RamificationCanvas = memo(function RamificationCanvas({ snap, thresholds, ramSel, setRamSel, onInject }) {
+  const allEdges = useAllActiveEdges(snap.flights, snap.ts);
+
+  const posOf = useCallback((id) => {
+    const l = RAM_LAYOUT.get(id);
+    return l ? { x: l.x, y: l.y } : null;
+  }, []);
+
+  const connectedSet = useMemo(() => {
+    if (!ramSel) return null;
+    const s = new Set();
+    for (const cat of ["field", "meta", "pool"])
+      for (const e of allEdges[cat])
+        if (e.from === ramSel || e.to === ramSel) s.add(`${e.from}-${e.to}`);
+    return s;
+  }, [ramSel, allEdges]);
+
+  const renderEdges = (edges) => edges.map(({ from, to, level }) => {
+    const f = posOf(from), t = posOf(to);
+    if (!f || !t) return null;
+    const color = ramEdgeColor(level);
+    const cat = level === "field" ? "field" : level.startsWith("meta") ? "meta" : "pool";
+    const baseOp = cat === "field" ? 0.4 : cat === "meta" ? 0.35 : 0.3;
+    const baseW = cat === "field" ? 2.5 : cat === "meta" ? 1.8 : 1.4;
+    const bright = ramSel && connectedSet && connectedSet.has(`${from}-${to}`);
+    const dim = ramSel && !bright;
+    const w = bright ? baseW * 1.8 : dim ? baseW * 0.4 : baseW;
+    const op = bright ? Math.min(1, baseOp * 2.5) : dim ? baseOp * 0.15 : baseOp;
+    const d = edgePath(f, t);
+    return (<g key={`e-${from}-${to}`}>
+      <path d={d} fill="none" stroke={color} strokeWidth={w} opacity={op * 0.4} />
+      <path d={d} fill="none" stroke={color} strokeWidth={w} strokeDasharray="5 4"
+        opacity={op} style={dim ? undefined : { animation: "march 0.4s linear infinite" }} />
+    </g>);
+  });
+
+  const renderParticles = (edges) => edges.map(({ from, to, progress, level }) => {
+    if (ramSel && connectedSet && !connectedSet.has(`${from}-${to}`)) return null;
+    const f = posOf(from), t = posOf(to);
+    if (!f || !t) return null;
+    const color = ramEdgeColor(level);
+    const cat = level === "field" ? "field" : level.startsWith("meta") ? "meta" : "pool";
+    const pr = cat === "field" ? 4 : cat === "meta" ? 3.5 : 3;
+    const { x, y } = bezAt(f, t, progress);
+    return <circle key={`p-${from}-${to}`} cx={x} cy={y} r={pr} fill={color} opacity={0.85} filter="url(#glow)" />;
+  });
+
+  return (
+    <svg width={W} height={H} style={{ display: "block" }}>
+      <SvgDefs />
+      <SectorArc startDeg={0} spanDeg={120} color={META_DEFS[0].color} r1={30} r2={310} />
+      <SectorArc startDeg={120} spanDeg={120} color={META_DEFS[1].color} r1={30} r2={310} />
+      <SectorArc startDeg={240} spanDeg={120} color={META_DEFS[2].color} r1={30} r2={310} />
+      <OrbitRing r={65} stroke="#3d2b14" width={0.5} dash="3 8" opacity={0.15} />
+      <OrbitRing r={150} stroke="#3d2b14" width={0.5} dash="3 8" opacity={0.15} />
+      <OrbitRing r={270} stroke="#3d2b14" width={0.5} dash="3 8" opacity={0.1} />
+      {renderEdges(allEdges.pool)}
+      {renderEdges(allEdges.meta)}
+      {renderEdges(allEdges.field)}
+      {renderParticles(allEdges.pool)}
+      {renderParticles(allEdges.meta)}
+      {renderParticles(allEdges.field)}
+      {RAM_ENTRIES.map(([gid, layout]) => {
+        const data = ramNodeData(gid, snap, thresholds);
+        return <RamNode key={gid} layout={layout} balance={data.balance} min={data.min} max={data.max}
+          selected={ramSel === gid} onClick={() => ramSel === gid ? onInject(gid) : setRamSel(gid)} />;
+      })}
+    </svg>
+  );
+});
+
+function RamDetailPanel({ ramSel, snap, thresholds, setRamSel, sim }) {
+  if (!ramSel) {
+    const total = snap.pools.reduce((s, p) => s + p.balances.reduce((a, b) => a + b, 0) + p.commonsBalance, 0)
+      + snap.metaCommons.reduce((s, mc) => s + mc.balance, 0) + snap.fieldCommonsBalance;
+    const banked = snap.pools.reduce((s, p) => s + p.banked.reduce((a, b) => a + b, 0) + p.commonsBanked, 0)
+      + snap.metaCommons.reduce((s, mc) => s + mc.banked, 0) + snap.fieldCommonsBanked;
+    return (
+      <div style={{ animation: "fadein 0.25s ease" }}>
+        <PanelHeader title="Ramification" subtitle="ALL 104 ENTITIES" color="#fcd34d" />
+        <div style={{ ...S.panel, padding: "12px 14px", marginBottom: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 8 }}>
+            <div><div style={{ fontSize: 18, fontWeight: 700, color: "#fcd34d" }}>${Math.round(total).toLocaleString()}</div><div style={{ ...S.label }}>ACTIVE</div></div>
+            {banked > 0 && <div><div style={{ fontSize: 18, fontWeight: 700, color: "#fcd34d" }}>${Math.round(banked).toLocaleString()}</div><div style={{ ...S.label }}>BANKED</div></div>}
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {META_DEFS.map((m, mi) => {
+              let mTotal = snap.metaCommons[mi].balance;
+              for (const pIdx of m.pools) mTotal += snap.pools[pIdx].balances.reduce((a, b) => a + b, 0) + snap.pools[pIdx].commonsBalance;
+              return <div key={mi} style={{ fontSize: 9 }}><span style={{ color: m.color }}>{m.short}:</span> <span style={{ color: "#c4a97a" }}>${Math.round(mTotal).toLocaleString()}</span></div>;
+            })}
+          </div>
+        </div>
+        <div style={{ fontSize: 9, color: "#6b4d2e", lineHeight: 1.8 }}>
+          Click any node to see details.<br />
+          1 field · 3 meta · 10 pool commons · 90 commoners
+        </div>
+      </div>
+    );
+  }
+  const layout = RAM_LAYOUT.get(ramSel);
+  const data = ramNodeData(ramSel, snap, thresholds);
+  const subtree = ramSubtreeTotal(ramSel, snap);
+  if (!layout || !data) return null;
+  const col = nodeColor(data.balance, data.min, data.max);
+  const state = getState(data.balance, data.min, data.max);
+  const levelLabel = layout.type === "field" ? "FIELD COMMONS" : layout.type === "meta" ? "META COMMONS" : layout.type === "pool" ? "POOL COMMONS" : "COMMONER";
+  const parentLabel = layout.metaIdx >= 0 ? (layout.poolIdx >= 0 ? POOL_DEFS[layout.poolIdx].label + " · " + META_DEFS[layout.metaIdx].short : META_DEFS[layout.metaIdx].short) : "";
+  return (
+    <div style={{ animation: "fadein 0.25s ease" }}>
+      <PanelHeader title={layout.label} subtitle={`${levelLabel}${parentLabel ? " · " + parentLabel : ""} · ${state.toUpperCase()}`} color={col} onBack={() => setRamSel(null)} />
+      <BalanceBar balance={data.balance} min={data.min} max={data.max} color={col} />
+      {subtree && (
+        <div style={{ ...S.panel, padding: "8px 14px", marginBottom: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ ...S.label }}>SUBTREE TOTAL</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "#c4a97a" }}>${Math.round(subtree.balance).toLocaleString()}</div>
+          </div>
+          {subtree.banked > 0 && <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4 }}>
+            <div style={{ ...S.label, color: "#fcd34d" }}>SUBTREE BANKED</div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#fcd34d" }}>${Math.round(subtree.banked).toLocaleString()}</div>
+          </div>}
+        </div>
+      )}
+      {(() => {
+        const childTh = commonsAvgChildTh(ramSel, thresholds);
+        return childTh
+          ? <CommonsThresholdEditor value={{ min: data.min, max: data.max }}
+              avgChildMin={childTh.avgChildMin} avgChildMax={childTh.avgChildMax}
+              onChange={(f, v) => ramSetThreshold(ramSel, sim, f, v)} />
+          : <ThresholdEditor value={{ min: data.min, max: data.max }}
+              onChange={(f, v) => ramSetThreshold(ramSel, sim, f, v)} />;
+      })()}
+      <ActionButtons onInject={() => ramInject(ramSel, sim)} amt={CFG.defaults.injectAmt}
+        onFill={() => ramFill(ramSel, sim)} showFill={data.balance < data.max} />
+      {data.banked > 0 && (
+        <div style={{ ...S.panel, padding: "10px 14px", marginBottom: 10, borderLeft: "3px solid #fcd34d", borderTop: "1px solid #fcd34d18", borderRight: "1px solid #fcd34d18", borderBottom: "1px solid #fcd34d18" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div style={{ ...S.label, color: "#fcd34d" }}>BANKED</div>
+            <div style={{ fontSize: 14, fontWeight: 700, color: "#fcd34d" }}>${Math.round(data.banked).toLocaleString()}</div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
 // ║  SECTION 9: LEVEL CANVAS                                                    ║
 // ║  The SINGLE canvas component. Self-similar at every holonic level.          ║
 // ║                                                                              ║
@@ -1454,7 +2274,7 @@ function LevelCanvas({ view, snap, sel, setSel, onNodeDrill, onZoomOut, onZoomTo
   }, [ripple]);
 
   // ── Outer context positions (must be defined before posOf) ────────────
-  const metaCommonsPos = useMemo(() => ({ x: CX, y: CY - CFG.orbits.metaR }), []);
+  const parentPos = useMemo(() => ({ x: CX, y: CY - CFG.orbits.metaR }), []);
   const siblingPositions = useMemo(() => {
     if (!outer) return [];
     return outer.siblings.map((sib, i) => {
@@ -1469,26 +2289,29 @@ function LevelCanvas({ view, snap, sel, setSel, onNodeDrill, onZoomOut, onZoomTo
     return positions[id] || COMMONS_POS;
   }, [positions]);
 
-  // Meta-level edge position resolver.
-  // This pool's commons → center (COMMONS_POS). Siblings → their orbit positions. Meta commons → top.
-  const metaPosOf = useCallback((id) => {
-    if (id === "mc") return metaCommonsPos;
-    if (typeof id === "string") {
-      if (id.startsWith("c")) {
-        const pIdx = parseInt(id[1]);
-        const sib = siblingPositions.find(s => s.id === pIdx);
-        if (sib) return { x: sib.x, y: sib.y };
-        return COMMONS_POS; // this pool's commons → center
+  // Outer-level edge position resolver.
+  // Maps flight IDs from the parent level to canvas positions.
+  const outerPosOf = useCallback((id) => {
+    if (!outer) return parentPos;
+    // Parent commons (meta commons or field commons)
+    if (id === outer.parent.flightId) return parentPos;
+    // This level's commons → center
+    if (id === outer.thisCommonsFlightId) return COMMONS_POS;
+    // Check siblings by flightIds
+    for (const sib of siblingPositions) {
+      if (sib.flightIds && sib.flightIds.some(fid => fid === id)) return { x: sib.x, y: sib.y };
+      // Also match "p{id}" targets → same position as "c{id}" sibling
+      if (typeof id === "string" && id.startsWith("p")) {
+        const gi = parseInt(id.slice(1));
+        if (sib.id === gi) return { x: sib.x, y: sib.y };
       }
-      if (id.startsWith("p")) {
-        const pIdx = parseInt(id[1]);
-        const sib = siblingPositions.find(s => s.id === pIdx);
-        if (sib) return { x: sib.x, y: sib.y };
-        return COMMONS_POS; // this pool → center
+      if (typeof id === "string" && id.startsWith("mc")) {
+        const mi = parseInt(id.slice(2));
+        if (sib.id === mi) return { x: sib.x, y: sib.y };
       }
     }
-    return metaCommonsPos;
-  }, [siblingPositions, metaCommonsPos]);
+    return parentPos;
+  }, [outer, siblingPositions, parentPos]);
 
   const outerEdges = useMemo(() => {
     if (!outer) return [];
@@ -1507,19 +2330,19 @@ function LevelCanvas({ view, snap, sel, setSel, onNodeDrill, onZoomOut, onZoomTo
     <svg width={W} height={H} style={{ display: "block" }}>
       <SvgDefs />
 
-      {/* ── MEMBRANE 3: Meta-level boundary (outermost) ── */}
+      {/* ── MEMBRANE 3: Parent boundary (outermost) ── */}
       {outer && <>
-        <Membrane r={CFG.orbits.metaR + 14} label="META NETWORK" color="#b87333" opacity={0.25} />
-        <OrbitRing r={CFG.orbits.metaR} stroke="#b87333" width={0.5} dash="2 10" opacity={0.06} />
-        <GhostNode x={metaCommonsPos.x} y={metaCommonsPos.y} r={CFG.orbits.metaSize}
-          label="META" balance={outer.metaCommons.balance}
-          color={nodeColor(outer.metaCommons.balance, outer.metaCommons.th.min, outer.metaCommons.th.max)}
+        <Membrane r={CFG.orbits.metaR + 14} label={outer.parentLabel} color={outer.parent.color || "#b87333"} opacity={0.25} />
+        <OrbitRing r={CFG.orbits.metaR} stroke={outer.parent.color || "#b87333"} width={0.5} dash="2 10" opacity={0.06} />
+        <GhostNode x={parentPos.x} y={parentPos.y} r={CFG.orbits.metaSize}
+          label={outer.parent.label} balance={outer.parent.balance}
+          color={nodeColor(outer.parent.balance, outer.parent.th.min, outer.parent.th.max)}
           onClick={onZoomOut} />
       </>}
 
-      {/* ── MEMBRANE 2: Inter-pool boundary ── */}
+      {/* ── MEMBRANE 2: Sibling boundary ── */}
       {outer && <>
-        <Membrane r={CFG.orbits.siblingR + 14} label="INTER-POOL" color="#5a4020" opacity={0.2} />
+        <Membrane r={CFG.orbits.siblingR + 14} label={outer.siblingLabel} color="#5a4020" opacity={0.2} />
         <OrbitRing r={CFG.orbits.siblingR} stroke="#6b4d2e" width={0.5} dash="2 10" opacity={0.08} />
         {siblingPositions.map(sib => (
           <GhostNode key={sib.id} x={sib.x} y={sib.y} r={CFG.orbits.siblingSize}
@@ -1527,9 +2350,9 @@ function LevelCanvas({ view, snap, sel, setSel, onNodeDrill, onZoomOut, onZoomTo
             onClick={() => onZoomToPool && onZoomToPool(sib.id)} />
         ))}
 
-        {/* Meta-level inter-pool flow edges — same UI as normal flows, gold */}
-        <FlowEdges edges={outerEdges} posOf={metaPosOf} nodeLayerMap={{}} hasSel={false} color="#fcd34d" marker="arrMeta" />
-        <FlowParticles edges={outerEdges} posOf={metaPosOf} nodeLayerMap={{}} hasSel={false} color="#fcd34d" colorBright="#fef3c7" />
+        {/* Outer-level flow edges — gold */}
+        <FlowEdges edges={outerEdges} posOf={outerPosOf} nodeLayerMap={{}} hasSel={false} color="#fcd34d" marker="arrMeta" />
+        <FlowParticles edges={outerEdges} posOf={outerPosOf} nodeLayerMap={{}} hasSel={false} color="#fcd34d" colorBright="#fef3c7" />
       </>}
 
       {/* ── MEMBRANE 1: This pool's boundary ── */}
@@ -1657,6 +2480,42 @@ function ThresholdEditor({ value, onChange }) {
   );
 }
 
+function CommonsThresholdEditor({ value, avgChildMin, avgChildMax, onChange }) {
+  const minMult = avgChildMin > 0 ? value.min / avgChildMin : 0;
+  const maxMult = avgChildMax > 0 ? value.max / avgChildMax : 0;
+  return (
+    <div style={{ marginTop: 10, marginBottom: 10 }}>
+      {[
+        { field: "min", color: TRAFFIC.deficit, label: "MIN", mult: minMult, avg: avgChildMin },
+        { field: "max", color: TRAFFIC.atMax, label: "MAX", mult: maxMult, avg: avgChildMax },
+      ].map(({ field, color, label, mult, avg }) => (
+        <div key={field} style={{ marginBottom: 8 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 3 }}>
+            <span style={{ fontSize: 10, color, letterSpacing: "0.1em" }}>{label}</span>
+            <span style={{ fontSize: 10, fontWeight: 700, fontFamily: "monospace" }}>
+              <span style={{ color }}>{mult.toFixed(1)}{"\u00D7"}</span>
+              <span style={{ color: "#8b6d45", fontWeight: 400, fontSize: 9 }}> avg child {field}</span>
+            </span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div style={{ flex: 1, position: "relative", height: 18 }}>
+              <div style={{ position: "absolute", top: 7, left: 0, right: 0, height: 4, borderRadius: 2, background: "#3d2b14" }} />
+              <div style={{ position: "absolute", top: 7, left: 0, width: `${Math.min(100, mult / 5 * 100)}%`, height: 4, borderRadius: 2, background: `linear-gradient(90deg, #946b3c, ${color})` }} />
+              <input type="range" min={0} max={5} step={0.1} value={mult}
+                aria-label={`${label} multiplier`}
+                onChange={e => onChange(field, Math.round(parseFloat(e.target.value) * avg))}
+                style={{ position: "absolute", top: 0, left: 0, width: "100%", height: 18, opacity: 0, cursor: "pointer", margin: 0 }} />
+            </div>
+            <span style={{ fontSize: 9, color: "#8b6d45", minWidth: 55, textAlign: "right" }}>
+              ${Math.round(mult * avg).toLocaleString()}
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ActionButtons({ onInject, amt, onFill, showFill }) {
   return (
     <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
@@ -1733,9 +2592,10 @@ function ParamSlider({ label, hint, value, min, max, step, format, onChange }) {
 
 function ViewToggle({ viewMode, onViewMode }) {
   const modes = [
-    { key: "personal", icon: "\u25C9", label: "PERSONAL" },
-    { key: "team",     icon: "\u25CE", label: "TEAM" },
-    { key: "network",  icon: "\u25C8", label: "NETWORK" },
+    { key: "personal", icon: "\u25CF", label: "YOU" },
+    { key: "team",     icon: "\u25CE", label: "POOL" },
+    { key: "meta",     icon: "\u25C8", label: "META" },
+    { key: "network",  icon: "\u2B21", label: "FIELD" },
   ];
   return (
     <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", border: "1px solid #3d2b14" }}>
@@ -1776,7 +2636,7 @@ function EpochSelector({ epochLength, epochDay, epochCount, onSetEpochLength }) 
     <div style={{ marginBottom: 14 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
         <div style={{ fontSize: 10, letterSpacing: "0.12em", color: "#fcd34d", fontWeight: 700 }}>
-          EPOCH {epochCount + 1} {"\u00B7"} DAY {epochDay}/{epochLength}
+          EPOCH {epochCount + 1} {"\u00B7"} DAY {epochDay + 1}/{epochLength}
         </div>
         <div style={{ fontSize: 9, color: "#8b6d45" }}>
           {presetMatch ? presetMatch.name : "Custom"}
@@ -1960,7 +2820,9 @@ function CommonsPanel({ view, snap, setSel }) {
         </div>
       )}
 
-      <ThresholdEditor value={{ min: commons.min, max: commons.max }} onChange={(f, v) => view.actions.setCommonsTh(f, v)} />
+      <CommonsThresholdEditor value={{ min: commons.min, max: commons.max }}
+        avgChildMin={commons.avgChildMin} avgChildMax={commons.avgChildMax}
+        onChange={(f, v) => view.actions.setCommonsTh(f, v)} />
       <ActionButtons onInject={() => view.actions.injectCommons()} amt={CFG.defaults.injectAmt}
         onFill={() => view.actions.fillCommons()} showFill={toMax > 0} />
       <div style={{ ...S.panel, padding: "10px 12px", marginBottom: 10 }}>
@@ -2056,13 +2918,17 @@ const PARAM_DEFS = [
 
 export default function App() {
   const sim = useSimulation();
-  const { snap, params, thresholds, commonsFlows, metaFlows, metaCommonsFlows, log, commonsRipples } = sim;
+  const { snap, params, thresholds, commonsFlows, metaFlows, metaCommonsFlows, fieldFlows, fieldCommonsFlows, log, commonsRipples } = sim;
 
   // ── Navigation state ──────────────────────────────────────────────────
-  const [zoom, setZoom] = useState("meta");       // "meta" | poolIndex
+  const [zoom, setZoom] = useState("field");       // "field" | "meta0"|"meta1"|"meta2" | poolIndex
   const [sel, setSel] = useState(null);            // null | "commons" | nodeIndex
   const [viewMode, setViewMode] = useState("network"); // "personal" | "team" | "network"
-  const [demo, setDemo] = useDemo(sim.injectNode);
+  const [vizMode, setVizMode] = useState("holonic"); // "holonic" | "ramification"
+  const [ramSel, setRamSel] = useState(null);
+  const { active: demo, setActive: setDemo } = useDemo(sim);
+  const [depth, setDepthState] = useState("field");
+  const handleDepth = useCallback((d) => { setDepthState(d); sim.setDepth(d); }, [sim]);
   const [showLog, setShowLog] = useState(false);
   const [injectMax, setInjectMax] = useState(100000);
 
@@ -2081,30 +2947,73 @@ export default function App() {
   const handleViewMode = useCallback((mode) => {
     setViewMode(mode);
     switch (mode) {
-      case "network":  setZoom("meta"); setSel(null); break;
+      case "network":  setZoom("field"); setSel(null); break;
+      case "meta":     setZoom(`meta${metaGroupOf(YOU.poolIdx)}`); setSel(null); break;
       case "team":     setZoom(YOU.poolIdx); setSel(null); break;
       case "personal": setZoom(YOU.poolIdx); setSel(YOU.nodeIdx); break;
     }
   }, []);
 
-  const zoomIn = useCallback((i) => { setZoom(i); setSel(null); }, []);
-  const zoomOut = useCallback(() => { setViewMode("network"); setZoom("meta"); setSel(null); }, []);
-  const resetAll = useCallback(() => { sim.reset(); setSel(null); setDemo(false); setAutoTime(false); setViewMode("network"); }, [sim, setDemo]);
+  // Navigate to a specific zoom target. Context-aware:
+  // - At field: i is meta index → "meta{i}"
+  // - At meta: i is local pool index → globalPoolIdx
+  // - At pool: i is global pool index (for sibling navigation)
+  const zoomIn = useCallback((i) => {
+    if (zoom === "field") {
+      setZoom(`meta${i}`); setSel(null);
+    } else if (typeof zoom === "string" && zoom.startsWith("meta")) {
+      const metaIdx = parseInt(zoom.slice(4));
+      const globalPoolIdx = META_DEFS[metaIdx].pools[i];
+      setZoom(globalPoolIdx); setSel(null);
+    } else {
+      // At pool level: i is a global pool index (sibling click)
+      setZoom(i); setSel(null);
+    }
+  }, [zoom]);
+
+  // Direct navigation for sibling ghost nodes (always uses global IDs)
+  const zoomToSibling = useCallback((globalId) => {
+    if (typeof zoom === "number") {
+      // At pool level: sibling is another pool
+      setZoom(globalId); setSel(null);
+    } else if (typeof zoom === "string" && zoom.startsWith("meta")) {
+      // At meta level: sibling is another meta
+      setZoom(`meta${globalId}`); setSel(null);
+    }
+  }, [zoom]);
+
+  const zoomOut = useCallback(() => {
+    if (typeof zoom === "number") {
+      // Pool → parent meta
+      setZoom(`meta${metaGroupOf(zoom)}`); setSel(null);
+    } else if (typeof zoom === "string" && zoom.startsWith("meta")) {
+      // Meta → field
+      setZoom("field"); setSel(null);
+    } else {
+      // Already at field
+      setViewMode("network"); setZoom("field"); setSel(null);
+    }
+  }, [zoom]);
+
+  const resetAll = useCallback(() => { sim.reset(); setSel(null); setDemo(false); setAutoTime(false); setViewMode("network"); setZoom("field"); handleDepth("field"); }, [sim, setDemo, handleDepth]);
 
   const effectiveSel = viewMode === "personal" ? YOU.nodeIdx : sel;
 
   // ── Normalized level view ─────────────────────────────────────────────
   const view = useMemo(() =>
-    buildLevelView(zoom, snap, thresholds, sim, commonsFlows, metaFlows, metaCommonsFlows, commonsRipples),
-    [zoom, snap, thresholds, sim, commonsFlows, metaFlows, metaCommonsFlows, commonsRipples]
+    buildLevelView(zoom, snap, thresholds, sim, commonsFlows, metaFlows, metaCommonsFlows, fieldFlows, fieldCommonsFlows, commonsRipples),
+    [zoom, snap, thresholds, sim, commonsFlows, metaFlows, metaCommonsFlows, fieldFlows, fieldCommonsFlows, commonsRipples]
   );
 
   // ── Derived counts ────────────────────────────────────────────────────
-  // At meta level, count all people across all pools (not the 3 pool nodes)
+  // At field/meta level, count all people across relevant pools
   const counts = useMemo(() => {
     let d = 0, f = 0, fl = 0;
-    if (zoom === "meta") {
-      for (let p = 0; p < CFG.poolCount; p++) {
+    if (zoom === "field" || (typeof zoom === "string" && zoom.startsWith("meta"))) {
+      const poolRange = zoom === "field"
+        ? Array.from({ length: CFG.poolCount }, (_, i) => i)
+        : META_DEFS[parseInt(zoom.slice(4))].pools;
+      for (const p of poolRange) {
         const ths = thresholds.pools[p].nodes;
         for (let i = 0; i < CFG.poolSize; i++) {
           const s = getState(snap.pools[p].balances[i], ths[i].min, ths[i].max);
@@ -2118,16 +3027,16 @@ export default function App() {
   }, [zoom, view.nodes, snap.pools, thresholds.pools]);
 
   const totalInNetwork = snap.pools.reduce((s, p) => s + p.balances.reduce((a, b) => a + b, 0) + p.commonsBalance, 0)
-    + snap.metaCommonsBalance;
+    + snap.metaCommons.reduce((s, mc) => s + mc.balance, 0) + snap.fieldCommonsBalance;
 
-  const canDrill = zoom === "meta"; // can zoom into a node only at meta level
+  const canDrill = zoom === "field" || (typeof zoom === "string" && zoom.startsWith("meta"));
 
   return (
     <div style={{ display: "flex", minHeight: "100vh", background: "#1a1008", fontFamily: "'IBM Plex Mono', 'Fira Code', monospace", color: "#f5e6d0" }}>
       <style>{CSS}</style>
 
       {/* ═══ LEFT PANEL — System Controls ═══ */}
-      <aside style={{ width: 280, boxSizing: "border-box", flexShrink: 0, flexGrow: 0, background: "#120b04", borderRight: "1px solid #3d2b14", overflowY: "auto", maxHeight: "100vh", padding: 16 }}>
+      <aside style={{ width: 320, boxSizing: "border-box", flexShrink: 0, flexGrow: 0, background: "#120b04", borderRight: "1px solid #3d2b14", overflowY: "auto", maxHeight: "100vh", padding: 16 }}>
 
         {/* Branding */}
         <div style={{ marginBottom: 14 }}>
@@ -2135,10 +3044,27 @@ export default function App() {
           <div style={{ fontSize: 14, fontWeight: 700, color: "#faf0e2" }}>Resource the Commons</div>
         </div>
 
-        {/* View Toggle */}
-        <div style={{ marginBottom: 14 }}>
-          <ViewToggle viewMode={viewMode} onViewMode={handleViewMode} />
+        {/* Viz Mode Toggle */}
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", border: "1px solid #3d2b14" }}>
+            {["holonic", "ramification"].map(m => (
+              <button key={m} onClick={() => { setVizMode(m); if (m === "ramification") { setRamSel(null); handleDepth("field"); } }}
+                style={{ flex: 1, padding: "7px 0", fontSize: 9, fontWeight: 700, fontFamily: "inherit",
+                  letterSpacing: "0.08em", cursor: "pointer", border: "none",
+                  background: vizMode === m ? "#3d2b14" : "transparent",
+                  color: vizMode === m ? "#fcd34d" : "#6b4d2e" }}>
+                {m === "holonic" ? "\u25CE HOLONIC" : "\u269B RAMIFICATION"}
+              </button>
+            ))}
+          </div>
         </div>
+
+        {/* View Toggle (holonic only) */}
+        {vizMode === "holonic" && (
+          <div style={{ marginBottom: 14 }}>
+            <ViewToggle viewMode={viewMode} onViewMode={handleViewMode} />
+          </div>
+        )}
 
         {/* Epoch Controls */}
         <EpochSelector
@@ -2173,6 +3099,25 @@ export default function App() {
           </span>
         </div>
 
+        {/* Simulation boundary */}
+        <div style={{ marginBottom: 6 }}>
+          <div style={{ fontSize: 8, color: "#6b4d2e", letterSpacing: "0.12em", marginBottom: 4, fontWeight: 700 }}>BOUNDARY</div>
+          <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", border: "1px solid #3d2b14" }}>
+            {DEPTH_LEVELS.map(d => {
+              const active = depth === d.key;
+              return (
+                <button key={d.key} onClick={() => handleDepth(d.key)}
+                  style={{ flex: 1, padding: "5px 0", fontSize: 8, fontWeight: 700, fontFamily: "inherit",
+                    letterSpacing: "0.06em", cursor: "pointer", border: "none",
+                    background: active ? "#3d2b14" : "transparent",
+                    color: active ? "#fcd34d" : "#6b4d2e" }}>
+                  {d.icon} {d.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         {/* Controls */}
         <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
           <button onClick={() => setDemo(d => !d)}
@@ -2180,6 +3125,10 @@ export default function App() {
             style={{ flex: 1, padding: "5px 0", borderRadius: 4, cursor: "pointer", fontSize: 9, fontWeight: 700, fontFamily: "inherit", letterSpacing: "0.08em", background: demo ? `${TRAFFIC.atMax}20` : "transparent", border: `1px solid ${demo ? TRAFFIC.atMax : "#6b4d2e"}`, color: demo ? TRAFFIC.atMax : "#7a5c3a" }}>
             {demo ? "\u25FC DEMO" : "\u25B6 DEMO"}
           </button>
+        </div>
+
+        {/* Controls */}
+        <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
           <HoverBtn onClick={resetAll} bg="transparent" hoverBg="transparent" color="#7a5c3a" border="1px solid #6b4d2e" style={{ flex: 1, padding: "5px 0", fontSize: 9, letterSpacing: "0.08em" }}>{"\u21BA"} RESET</HoverBtn>
           {log.length > 0 && (
             <button onClick={() => setShowLog(true)}
@@ -2240,30 +3189,45 @@ export default function App() {
 
         {/* Conservation audit */}
         {snap.totalInjected > 0 && (() => {
-          const poolNodeBals = snap.pools.map(p => Math.round(p.balances.reduce((a, b) => a + b, 0)));
-          const poolCommonsBals = snap.pools.map(p => Math.round(p.commonsBalance));
-          const poolBanked = snap.pools.map(p => Math.round(p.banked.reduce((a, b) => a + b, 0)) + Math.round(p.commonsBanked));
-          const metaComm = Math.round(snap.metaCommonsBalance);
+          let poolNodesTotal = 0, poolCommonsTotal = 0, poolBankedTotal = 0;
+          const metaBals = [], metaBankedArr = [];
+          for (let m = 0; m < CFG.metaCount; m++) {
+            let mNodes = 0, mCommons = 0, mBanked = 0;
+            for (const pIdx of META_DEFS[m].pools) {
+              mNodes += Math.round(snap.pools[pIdx].balances.reduce((a, b) => a + b, 0));
+              mCommons += Math.round(snap.pools[pIdx].commonsBalance);
+              mBanked += Math.round(snap.pools[pIdx].banked.reduce((a, b) => a + b, 0)) + Math.round(snap.pools[pIdx].commonsBanked);
+            }
+            poolNodesTotal += mNodes; poolCommonsTotal += mCommons; poolBankedTotal += mBanked;
+            metaBals.push(Math.round(snap.metaCommons[m].balance));
+            metaBankedArr.push(Math.round(snap.metaCommons[m].banked));
+          }
+          const metaTotal = metaBals.reduce((s,v)=>s+v,0);
+          const metaBanked = metaBankedArr.reduce((s,v)=>s+v,0);
+          const fc = Math.round(snap.fieldCommonsBalance);
+          const fcb = Math.round(snap.fieldCommonsBanked);
           const inFlight = Math.round(snap.pendingTotal);
-          const bankedTotal = poolBanked.reduce((s,v)=>s+v,0) + Math.round(snap.metaCommonsBanked);
-          const tracked = poolNodeBals.reduce((s,v)=>s+v,0) + poolCommonsBals.reduce((s,v)=>s+v,0) + metaComm + inFlight + bankedTotal;
+          const bankedTotal = poolBankedTotal + metaBanked + fcb;
+          const tracked = poolNodesTotal + poolCommonsTotal + metaTotal + fc + inFlight + bankedTotal;
           const leaked = Math.round(snap.totalInjected) - tracked;
 
           return (
             <div style={{ marginTop: 10, fontSize: 9, color: "#7a5c3a", lineHeight: 2 }}>
               <div>Injected: <strong style={{ color: "#fcd34d" }}>${Math.round(snap.totalInjected).toLocaleString()}</strong></div>
               <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 4 }}>
-                {POOL_DEFS.map((p, i) => (
-                  <div key={i} style={{ fontSize: 8 }}>
-                    <span style={{ color: p.color }}>{p.short}:</span>{" "}
-                    <span style={{ color: "#c4a97a" }}>nodes ${poolNodeBals[i].toLocaleString()}</span>{" "}
-                    <span style={{ color: TRAFFIC.flowing }}>commons ${poolCommonsBals[i].toLocaleString()}</span>
-                    {poolBanked[i] > 0 && <>{" "}<span style={{ color: "#fcd34d" }}>banked ${poolBanked[i].toLocaleString()}</span></>}
-                  </div>
-                ))}
-                {metaComm > 0 && <div style={{ fontSize: 8 }}><span style={{ color: "#b87333" }}>meta commons ${metaComm.toLocaleString()}</span></div>}
-                {inFlight > 0 && <div style={{ fontSize: 8 }}><span style={{ color: "#d4913a" }}>in flight ${inFlight.toLocaleString()}</span></div>}
-                {bankedTotal > 0 && <div style={{ fontSize: 8 }}><span style={{ color: "#fcd34d" }}>total banked ${bankedTotal.toLocaleString()}</span></div>}
+                {META_DEFS.map((m, mi) => {
+                  let mTotal = metaBals[mi];
+                  for (const pIdx of m.pools) mTotal += Math.round(snap.pools[pIdx].balances.reduce((a,b)=>a+b,0)) + Math.round(snap.pools[pIdx].commonsBalance);
+                  return (
+                    <div key={mi} style={{ fontSize: 8 }}>
+                      <span style={{ color: m.color }}>{m.short}:</span>{" "}
+                      <span style={{ color: "#c4a97a" }}>${mTotal.toLocaleString()}</span>
+                    </div>
+                  );
+                })}
+                {fc > 0 && <div style={{ fontSize: 8 }}><span style={{ color: "#fcd34d" }}>field ${fc.toLocaleString()}</span></div>}
+                {inFlight > 0 && <div style={{ fontSize: 8 }}><span style={{ color: "#d4913a" }}>flight ${inFlight.toLocaleString()}</span></div>}
+                {bankedTotal > 0 && <div style={{ fontSize: 8 }}><span style={{ color: "#fcd34d" }}>banked ${bankedTotal.toLocaleString()}</span></div>}
               </div>
               <div style={{ marginTop: 2 }}>
                 Accounted: <strong style={{ color: leaked !== 0 ? TRAFFIC.deficit : TRAFFIC.atMax }}>${tracked.toLocaleString()}</strong>
@@ -2277,12 +3241,18 @@ export default function App() {
 
       {/* ═══ CENTER — Canvas ═══ */}
       <div style={{ flex: 1, display: "flex", justifyContent: "center", alignItems: "flex-start", minWidth: 0 }}>
-        <LevelCanvas view={view} snap={snap} sel={effectiveSel} setSel={setSel}
-          onNodeDrill={canDrill ? zoomIn : null} onZoomOut={zoomOut} onZoomToPool={zoomIn} />
+        {vizMode === "ramification"
+          ? <RamificationCanvas snap={snap} thresholds={thresholds} ramSel={ramSel} setRamSel={setRamSel} onInject={(gid) => { ramInject(gid, sim); setRamSel(null); }} />
+          : <LevelCanvas view={view} snap={snap} sel={effectiveSel} setSel={setSel}
+              onNodeDrill={canDrill ? zoomIn : null} onZoomOut={zoomOut} onZoomToPool={zoomToSibling} />}
       </div>
 
       {/* ═══ RIGHT PANEL — Context Detail ═══ */}
-      <div style={{ width: 280, boxSizing: "border-box", flexShrink: 0, flexGrow: 0, borderLeft: "1px solid #3d2b14", maxHeight: "100vh", overflowY: "auto", padding: 16 }}>
+      <div style={{ width: 320, boxSizing: "border-box", flexShrink: 0, flexGrow: 0, borderLeft: "1px solid #3d2b14", maxHeight: "100vh", overflowY: "auto", padding: 16 }}>
+        {vizMode === "ramification" ? (<>
+          <RamDetailPanel ramSel={ramSel} snap={snap} thresholds={thresholds} setRamSel={setRamSel} sim={sim} />
+          {log.length > 0 && <FlowLog log={log} />}
+        </>) : (<>
         {effectiveSel === "commons" && <CommonsPanel view={view} snap={snap} setSel={setSel} />}
         {typeof effectiveSel === "number" && <NodePanel nodeId={effectiveSel} view={view} snap={snap} setSel={setSel} onDrill={canDrill ? zoomIn : null} />}
 
@@ -2301,6 +3271,7 @@ export default function App() {
 
         {/* Flow log always accessible at bottom */}
         {effectiveSel !== null && log.length > 0 && <FlowLog log={log} />}
+        </>)}
       </div>
 
       {/* ═══ LOG OVERLAY ═══ */}
