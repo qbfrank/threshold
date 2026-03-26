@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npx vite build:*)"
+      "Bash(npx vite build:*)",
+      "Bash(python3 -c \"import flask\")",
+      "Bash(pip3 install:*)",
+      "Bash(python3 -m venv .venv)",
+      "Bash(.venv/bin/pip install:*)"
     ]
   }
 }
